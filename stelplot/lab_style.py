@@ -177,6 +177,29 @@ STYLE_FIELDS = [
     ("palette", "Colors", "colors", None),
 ]
 CUSTOM_STYLES = {}
+CUSTOM_PALETTES = {}   # color schemes made in the color scheme editor
+MAX_PALETTE_COLORS = 12
+
+
+def register_palette(name, colors):
+    """Add or replace a custom color scheme. Built-in palette names cannot be replaced."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("A color scheme needs a name.")
+    if name in BUILTIN_PALETTES or name in STYLE_PRESETS:
+        raise ValueError(f"'{name}' is a built-in name. Save the colors under a new name.")
+    cols = [c.upper() for c in colors if _is_hex(c)][:MAX_PALETTE_COLORS]
+    if not cols:
+        raise ValueError("A color scheme needs at least one color (#RRGGBB).")
+    CUSTOM_PALETTES[name] = cols
+    PALETTES[name] = list(cols)
+    return cols
+
+
+def remove_palette(name):
+    CUSTOM_PALETTES.pop(name, None)
+    if name not in BUILTIN_PALETTES and name not in CUSTOM_STYLES:
+        PALETTES.pop(name, None)
 
 
 def preset(name):
@@ -265,10 +288,18 @@ def load_style_library(path):
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
     names = []
-    for name, values in (data.get("styles", data) if isinstance(data, dict) else {}).items():
-        if isinstance(values, dict) and name not in STYLE_PRESETS:
+    styles = data.get("styles", data) if isinstance(data, dict) else {}
+    for name, values in styles.items():
+        if isinstance(values, dict) and name not in STYLE_PRESETS and name != "palettes":
             register_style(name, values)
             names.append(name)
+    for name, colors in ((data.get("palettes") or {}) if isinstance(data, dict) else {}).items():
+        if isinstance(colors, list):
+            try:
+                register_palette(name, colors)
+                names.append(name)
+            except ValueError:
+                pass
     return names
 
 
@@ -276,7 +307,8 @@ def save_style_library(path, names=None):
     import json
     names = sorted(CUSTOM_STYLES) if names is None else names
     data = {"stelplot_styles": 1, "styles": {n: style_definition(n) for n in names
-                                             if n in CUSTOM_STYLES}}
+                                             if n in CUSTOM_STYLES},
+            "palettes": {n: list(c) for n, c in sorted(CUSTOM_PALETTES.items())}}
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1)
 
