@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?><GraphPadPrismFile PrismXMLVersion="5.00">
+<Table ID="Table1" XFormat="none" TableType="OneWay" EVFormat="AsteriskAfterNumber">
+<Title>Column test</Title>
+<YColumn Width="75" Decimals="1" Subcolumns="1"><Title>Control</Title><Subcolumn><d>1.5</d><d>2.5</d><d Excluded="1">9.9</d></Subcolumn></YColumn>
+<YColumn Width="75" Decimals="1" Subcolumns="1"><Title>Drug</Title><Subcolumn><d>3</d><d>4</d><d>5</d></Subcolumn></YColumn>
+</Table>
+<Table ID="Table2" XFormat="none" YFormat="replicates" Replicates="2" TableType="TwoWay" EVFormat="AsteriskAfterNumber">
+<Title>Grouped test</Title>
+<RowTitlesColumn Width="90"><Subcolumn><d>Wild type</d><d>Mutant</d></Subcolumn></RowTitlesColumn>
+<YColumn Width="70" Decimals="1" Subcolumns="2"><Title>Before</Title><Subcolumn><d>1</d><d>2</d></Subcolumn><Subcolumn><d>3</d><d>4</d></Subcolumn></YColumn>
+<YColumn Width="70" Decimals="1" Subcolumns="2"><Title>After</Title><Subcolumn><d>5</d><d>6</d></Subcolumn><Subcolumn><d>7</d><d></d></Subcolumn></YColumn>
+</Table>
+<Table ID="Table3" XFormat="numbers" YFormat="replicates" Replicates="1" TableType="XY" EVFormat="AsteriskAfterNumber">
+<Title>XY test</Title>
+<XColumn Width="98" Subcolumns="1" Decimals="0"><Title>Hours</Title><Subcolumn><d>0</d><d>1</d><d>2</d></Subcolumn></XColumn>
+<YColumn Width="70" Decimals="1" Subcolumns="1"><Title>Signal</Title><Subcolumn><d>10</d><d>20</d><d>30</d></Subcolumn></YColumn>
+</Table>
+<Table ID="Table4" XFormat="none" YFormat="SDN" TableType="TwoWay" EVFormat="AsteriskAfterNumber">
+<Title>Summary data</Title>
+<YColumn Width="70" Decimals="1" Subcolumns="3"><Title>A</Title><Subcolumn><d>1</d></Subcolumn><Subcolumn><d>0.1</d></Subcolumn><Subcolumn><d>3</d></Subcolumn></YColumn>
+</Table>
+</GraphPadPrismFile>

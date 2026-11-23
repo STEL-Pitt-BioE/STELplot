@@ -1,0 +1,13 @@
+# STELplot conda environment (author: Daniel Shiwarski)
+name: stelplot
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.24
+  - scipy>=1.11
+  - matplotlib>=3.7
+  - pyqt=5.15
+  - pip
+  - pip:
+      - pyinstaller

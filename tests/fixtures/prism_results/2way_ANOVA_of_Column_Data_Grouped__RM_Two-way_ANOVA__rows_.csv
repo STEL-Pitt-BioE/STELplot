@@ -1,0 +1,31 @@
+"Table Analyzed","Column Data Grouped: RM Two-way ANOVA (rows)",,,,
+,,,,,
+"Two-way RM ANOVA","Matching: Across row",,,,
+"    Assume sphericity?",Yes,,,,
+"    Alpha",0.05,,,,
+,,,,,
+"Source of Variation","% of total variation","P value","P value summary",Significant?,
+"    Row Factor x Time",4.652,0.1489,ns,No,
+"    Row Factor",61.57,0.0081,**,Yes,
+"    Time",13.05,0.0083,**,Yes,
+"    Subject",15.47,0.1070,ns,No,
+,,,,,
+"ANOVA table",SS,DF,MS,"F (DFn, DFd)","P value"
+"    Row Factor x Time",1020,2,510.1,"F (2, 6) = 2.660",P=0.1489
+"    Row Factor",13502,2,6751,"F (2, 6) = 11.94",P=0.0081
+"    Time",2863,1,2863,"F (1, 6) = 14.93",P=0.0083
+"    Subject",3393,6,565.4,"F (6, 6) = 2.948",P=0.1070
+"    Residual",1151,6,191.8,,
+,,,,,
+"Difference between column means",,,,,
+"    Mean of Before ",44.56,,,,
+"    Mean of After",69.78,,,,
+"    Difference between means",-25.22,,,,
+"    SE of difference",6.528,,,,
+"    95% CI of difference","-41.20 to -9.248",,,,
+,,,,,
+"Data summary",,,,,
+"    Number of columns (Time)",2,,,,
+"    Number of rows (Row Factor)",3,,,,
+"    Number of subjects (Subject)",9,,,,
+"    Number of missing values",0,,,,
