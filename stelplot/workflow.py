@@ -29,7 +29,7 @@ def load_methods(path):
         data = json.load(fh)
     methods = data.get("methods", {}) if isinstance(data, dict) else {}
     return {name: m for name, m in methods.items()
-            if isinstance(m, dict) and m.get("kind") in ("column", "grouped", "xy")}
+            if isinstance(m, dict) and m.get("kind") in ("column", "grouped", "xy", "xyz")}
 
 
 def save_methods(path, methods):

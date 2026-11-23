@@ -639,6 +639,89 @@ def interface():
     app.processEvents()
     done.append("dark mode, methods text, and preview zoom")
 
+    # v1.9 graphs: volcano, grouped box, arrangements, orientation, right axis, circles, 3D, colors
+    from stelplot import plotting as pl
+    from stelplot import plot3d as p3
+
+    def drawn(label):
+        win.refresh()
+        app.processEvents()
+        text = win.results.toPlainText()
+        if "could not be drawn" in text:
+            raise RuntimeError(f"{label}: {text}")
+        return text
+
+    g = win.add_table("grouped", "Proteomics")
+    g.panel.load_volcano_example()
+    g.opts.set("plot_type", pl.VOLCANO)
+    g.opts.update_enabled()
+    if "Volcano plot:" not in drawn("grouped volcano") or win.last.get("volcano") is None:
+        raise RuntimeError("The grouped volcano plot did not list its results")
+    if g.opts.sections["Volcano plot"].isHidden():
+        raise RuntimeError("Volcano settings are hidden for a volcano plot")
+    win.save_results_to(os.path.join(out, "volcano.csv"))
+    win.save_figure_to(os.path.join(out, "volcano.svg"))
+    g2 = win.add_table("grouped", "Arrangements")
+    g2.panel.load_example()
+    for pt in (pl.GROUPED_BOX, pl.AREA, pl.BARS_3D):
+        g2.opts.set("plot_type", pt)
+        drawn(pt)
+    g2.opts.set("plot_type", "Grouped bars")
+    for arrangement in pl.ARRANGEMENTS:
+        g2.opts.set("arrangement", arrangement)
+        drawn(arrangement)
+    g2.opts.set("arrangement", "Interleaved")
+    g2.opts.set("orientation", "Horizontal")
+    drawn("horizontal bars")
+    g2.opts.set("orientation", "Vertical")
+    g2.opts.set("plot_type", "Line plot (mean ± error)")
+    drawn("line plot")
+    g2.opts.set("right_series", ["Treated"])
+    drawn("right axis")
+    if win.last["opts"].right_series != ("Treated",) or len(win.fig.axes) != 2:
+        raise RuntimeError("The right Y axis was not drawn")
+    g2.opts.set("plot_type", pl.HEAT_MAP)
+    g2.opts.set("heat_shape", "Circles")
+    drawn("circle heat map")
+    if "Table: Proteomics" not in [g2.opts.controls["circle_color"].itemText(i)
+                                   for i in range(g2.opts.controls["circle_color"].count())]:
+        raise RuntimeError("Other grouped tables are not offered as circle colors")
+    xy = win.add_table("xy", "Volcano XY")
+    xy.panel.load_volcano_example()
+    xy.opts.set("plot_type", pl.VOLCANO)
+    if "PROT" not in drawn("XY volcano"):
+        raise RuntimeError("Row titles did not name the XY volcano points")
+    xy.opts.set("plot_type", pl.AREA)
+    drawn("XY area")
+    d3 = win.add_table("xyz", "3D")
+    d3.panel.load_example()
+    for kind in p3.KINDS_3D:
+        d3.opts.set("plot_type", kind)
+        drawn(kind)
+    d3.opts.set("color_by", p3.COLOR_BY[1])
+    drawn("3D color column")
+    win.save_figure_to(os.path.join(out, "surface.pdf"))
+    col = win.tables[0]
+    win.table_list.setCurrentRow(0)
+    col.panel.load_example()
+    col.opts.set("orientation", "Horizontal")
+    drawn("horizontal column graph")
+    ls.register_palette("Check scheme", ["#7A1F1F", "#E07B39", "#5B8E7D"])
+    win._refresh_style_lists()
+    col.opts.set("palette", "Check scheme")
+    drawn("custom colors")
+    path = os.path.join(out, "v19.stelplot")
+    win.save_project_to(path)
+    ls.remove_palette("Check scheme")
+    win.open_project_file(path)
+    if win.tables[0].opts.get("palette") != "Check scheme" or "Check scheme" not in ls.PALETTES:
+        raise RuntimeError("A custom color scheme did not come back with the project")
+    if [t.kind for t in win.tables][-1] != "xyz" or not win.tables[-2].panel.row_titles:
+        raise RuntimeError("3D tables or XY row titles were not saved in the project")
+    done.append("volcano plots (grouped and XY), grouped box plots, area plots, interleaved, "
+                "separated, stacked, and superimposed bars, horizontal graphs, right Y axis, circle "
+                "heat map, 3D tables (scatter, line, surface, wireframe, bars), custom color schemes")
+
     win.dirty = False
     win.close()
     return f"{', '.join(done)}; test files written to {out}"
@@ -653,7 +736,8 @@ if __name__ == "__main__":
         has_qt = step("PyQt5", pyqt)
         step("Fonts", fonts)
         for suite in ("test_core", "test_anova", "test_prism", "test_style", "test_palette",
-                      "test_prism_bundle", "test_custom_style", "test_features"):
+                      "test_prism_bundle", "test_custom_style", "test_features",
+                      "test_graph_types"):
             step(f"Test suite {suite}", run_suite(suite))
         if has_qt:
             step("Interface (built off screen, every table type exercised)", interface)

@@ -1,7 +1,7 @@
 # STELplot
 
 Plotting and statistics for the Shiwarski Tissue Engineering Lab.
-Author: Daniel Shiwarski. Version 1.4.0.
+Author: Daniel Shiwarski. Version 1.9.0.
 
 STELplot covers the everyday Prism workflow: type, paste, or import data; pick a graph and a test; and export a lab-formatted figure that opens cleanly in Adobe Illustrator.
 
@@ -29,7 +29,19 @@ STELplot covers the everyday Prism workflow: type, paste, or import data; pick a
 
 **Reusable workflows.** Save settings as method stores a table's analysis and graph settings; Apply method uses them on another table of the same type. Apply settings from another table copies them directly (like Prism's Clone a Graph). Duplicate with empty data keeps a table's layout and settings for a new experiment (like Duplicate Family). Freeze (Cmd+L) locks a table's data against edits.
 
-**Graph types.** Column tables: scatter dot, bar with points, box, violin, before-after, and frequency distribution (histogram with a chosen bin width and first bin; counts, percents, or fractions; frequency table in the results). Grouped tables: grouped bars, grouped scatter, line, and heat map (cell means with a color bar; Viridis, Cividis, Magma, Blues, or red-blue). XY tables: points, error bars or bands, and curve fits. Log scale Y axis is available for every graph and log scale X for XY graphs; log axes change only the display, never the statistics. Reference lines at Y on every graph, and at X on XY graphs and histograms.
+**Graph types.** Column tables: scatter dot, bar with points, box, violin, before-after, and frequency distribution (histogram with a chosen bin width and first bin; counts, percents, or fractions; frequency table in the results). Grouped tables: grouped bars, grouped scatter, grouped box plot, line, area, heat map (cell means with a color bar; Viridis, Cividis, Magma, Blues, red-blue, or your own color scheme), volcano plot, and 3D bars. XY tables: points and lines, area, and volcano plots, with error bars or bands and curve fits. 3D tables: 3D scatter, line, surface, wireframe, and bars. Means, medians, error bars, and box and violin lines are drawn over the individual points so they stay visible. Log scale Y axis is available for every graph and log scale X for XY graphs; log axes change only the display, never the statistics. Reference lines at Y on every graph, and at X on XY graphs and histograms.
+
+**Bar arrangements and orientation.** Grouped bars can be Interleaved (data sets side by side in each row), Separated (one block of bars per data set, named above it), Stacked (data sets piled up, with the upward error bar on each segment), or Superimposed (data sets overlapping at one position, the shorter bar in front, in solid colors so they do not mix). Area plots can be stacked or superimposed. Orientation turns column and grouped graphs horizontal: groups run down the Y axis and values along X, with brackets and stars turned to match.
+
+**Right Y axis.** Grouped bars, scatter, line, and area graphs and XY graphs can draw chosen data sets against a second Y axis on the right, with its own title and range (under Right Y axis in the settings).
+
+**Volcano plots.** In a Grouped table, each row is one protein, gene, or site; the second data set on the graph is compared with the first by a t test on each row (Welch's or equal-SD), and the fold change is log2 of the ratio of means, or the difference of means for data already on a log2 scale. In an XY table, X holds log2 fold changes and Y their P values (or -log10 P); turn on Row titles to name the points. Set the fold change and P cutoffs, or threshold on Benjamini-Hochberg adjusted P values (false discovery rate). Up, down, and not significant points take their own colors, the legend gives the counts, and the most significant rows (plus any you name) are labeled without overlapping. The results list every changed row; Export results saves every row as CSV.
+
+**Circle heat maps.** Heat maps can draw each cell as a circle whose area shows the cell mean and whose color shows a second value: the same mean, the SD, SEM, number of values, coefficient of variation, or the cell means of another grouped table (matched by row and data set names). A size key and a color bar explain both.
+
+**3D graphs.** New table > 3D table holds X, Y, and Z for each point and an optional fourth value. Draw a 3D scatter, line, surface, wireframe, or bars, colored by Z, by the fourth value (a 4th variable on a color scale with its own color bar), or in one color. Set the viewing elevation and rotation, perspective or orthographic projection, Z limits, and bar width. A full grid of X and Y values gives a smooth surface; scattered points are joined into a triangulated surface. Grouped tables can also draw 3D bars (rows by data sets), colored by data set or by value.
+
+**Custom color schemes.** Click Edit colors... under Style and size to choose up to 12 colors in order, save them under a name, and use them on any graph; a colorblind check scores them as you choose. A scheme of two or more colors can also be a heat map or 3D color scale. Schemes are kept on this computer and travel inside projects that use them.
 
 **Figures.** Export as SVG, PDF, EPS, PNG, or TIFF. EPS has no transparency, so partly transparent fills are blended with white. Layout (toolbar or File > Export layout sheet) switches to the layout sheet view, a live preview of several graphs arranged with panel letters; export it as editable SVG or 600 dpi PNG or TIFF, and click Back to graph to return. Error bars can be dashed.
 
@@ -80,7 +92,7 @@ Other palettes: Lab template, Okabe-Ito, Tol muted, Tol bright, Lab navy/blue, a
 
 ## Testing status
 
-Automated checks pass in eight scripts (run `python launch_check.py` for the current count):
+Automated checks pass in nine scripts (run `python launch_check.py` for the current count):
 
 - `tests/test_core.py` (66): column statistics against SciPy, curve fits, export formats, exact axis lengths and preset text settings, Prism-like axis ranges.
 - `tests/test_anova.py` (36): two-way, mixed, and repeated-measures ANOVA against independent textbook formulas.
@@ -89,6 +101,7 @@ Automated checks pass in eight scripts (run `python launch_check.py` for the cur
 - `tests/test_prism_bundle.py`: reads a synthetic .prism file built with the layout found in a Prism 11.1 file, and compares with Prism 11 results when the lab file is present.
 - `tests/test_custom_style.py`: marker shapes on every graph type, custom style validation, export of custom line widths and colors, and saving and reloading the style library.
 - `tests/test_features.py`: confidence levels, cell-by-cell comparisons, the main-effects model, Prism-style rounding, dashed error bars, EPS, transformations, plain-language summaries and warnings, layout sheets, theme contrast, and saved methods.
+- `tests/test_graph_types.py`: summary lines over points, grouped box plots, stacked, superimposed, and separated bars, area plots, horizontal graphs, right Y axes, volcano statistics (Welch's t test per row against SciPy, Benjamini-Hochberg adjustment against the step-up procedure by hand) and labels, circle heat maps, custom color schemes, and every 3D graph type and color choice.
 - `tests/test_palette.py` (6): CIEDE2000 against published test pairs, and the Journal palette scores above.
 
 Also checked against Prism 11 results stored in a lab .prism file (not shipped; place it in `tests/fixtures/private/` to rerun): Welch's t test (difference B - A, CI, SE), ordinary one-way ANOVA with Tukey for unequal n (540 to 3,241), ordinary two-way ANOVA including the difference between column means, and RM one-way ANOVA with the Geisser-Greenhouse correction followed by Tukey's test.
@@ -152,6 +165,8 @@ PyQt5 is available under GPL v3 or a commercial license. Internal lab use is fin
 stelplot_app.py            Launcher and PyInstaller entry point
 stelplot/gui.py            PyQt5 interface
 stelplot/plotting.py       Figure rendering and export
+stelplot/volcano.py        Volcano plots: per-row tests, FDR adjustment, labels
+stelplot/plot3d.py         3D scatter, line, surface, wireframe, and bar graphs
 stelplot/lab_style.py      Style presets, palettes, geometry
 stelplot/color_check.py    Colorblind-safety scoring for palettes
 stelplot/stats_engine.py   Column tests, curve fits, reports

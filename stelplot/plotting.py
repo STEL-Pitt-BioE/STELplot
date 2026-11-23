@@ -33,10 +33,24 @@ from .stats_engine import error_halfwidth, finite, summary_values
 
 PLOT_TYPES = ["Scatter dot plot", "Bar with points", "Box plot", "Violin plot",
               "Before-after (matched rows)", "Frequency distribution"]
-GROUPED_PLOT_TYPES = ["Grouped bars", "Grouped scatter dot plot", "Line plot (mean ± error)",
-                      "Heat map"]
+GROUPED_BOX = "Grouped box plot"
+AREA = "Area plot"
+VOLCANO = "Volcano plot"
+BARS_3D = "3D bars"
+GROUPED_PLOT_TYPES = ["Grouped bars", "Grouped scatter dot plot", GROUPED_BOX,
+                      "Line plot (mean ± error)", AREA, "Heat map", VOLCANO, BARS_3D]
+XY_PLOT_TYPES = ["Points and lines", AREA, VOLCANO]
 HISTOGRAM = "Frequency distribution"
 HEAT_MAP = "Heat map"
+# Prism's arrangements for grouped bars: side by side, one block per data set, stacked, overlapping
+ARRANGEMENTS = ["Interleaved", "Separated", "Stacked", "Superimposed"]
+ORIENTATIONS = ["Vertical", "Horizontal"]
+HEAT_SHAPES = ["Squares", "Circles"]
+# What colors the circles of a circle heat map (their size always shows the cell mean)
+CIRCLE_COLORS = ["Same as size", "SD", "SEM", "Number of values", "Coefficient of variation"]
+# Graph types that can put data sets on a second (right) Y axis
+RIGHT_AXIS_TYPES = ("Grouped bars", "Grouped scatter dot plot", "Line plot (mean ± error)",
+                    "Points and lines", AREA)
 HIST_VALUES = ["Count", "Percent", "Fraction"]
 HIST_STYLES = ["Bars", "Outline"]
 HIST_Y_TITLES = {"Count": "Number of values", "Percent": "Percent of values",
@@ -70,6 +84,24 @@ def marker_for(choice, index, st):
 def marker_size(size, code, st):
     """Marker size giving every shape the same visual weight as a circle of `size`."""
     return size * (st.get("square_scale", 1.414) if code == "s" else EQUAL_AREA.get(code, 1.0))
+
+
+Z_POINTS = 3      # individual values
+Z_SUMMARY = 4     # means, medians, and error bars are drawn over the points
+
+
+def _style_boxes(bp, colors, alpha, lw, thin, ms, fliers):
+    """Box plot colors. The box fill sits under the points; the median, whiskers, and caps
+    sit over them so they stay visible."""
+    for i, c in enumerate(colors):
+        bp["boxes"][i].set(facecolor=to_rgba(c, alpha), edgecolor=c, linewidth=lw, zorder=1)
+        bp["medians"][i].set(color=c, linewidth=lw, zorder=Z_SUMMARY)
+        for part in ("whiskers", "caps"):
+            for line in bp[part][2 * i:2 * i + 2]:
+                line.set(color=c, linewidth=lw, zorder=Z_SUMMARY)
+        if fliers and i < len(bp["fliers"]):
+            bp["fliers"][i].set(marker="o", markersize=ms * 0.8, markerfacecolor="none",
+                                markeredgecolor=c, markeredgewidth=thin, zorder=Z_POINTS)
 
 
 def _scatter(ax, x, y, color, code, size, filled, st, z):
@@ -140,6 +172,24 @@ class ColumnPlotOptions:
     frame: str = "Open"
     ref_y: str = ""
     log_y: bool = False
+    orientation: str = "Vertical"
+
+
+@dataclass
+class VolcanoOptions:
+    """Volcano plot settings, shared by grouped and XY tables."""
+    fc_cutoff: float = 1.0            # |log2 fold change| at or above this counts as changed
+    p_cutoff: float = 0.05
+    use_fdr: bool = False             # threshold on Benjamini-Hochberg adjusted P values
+    test: str = "Welch's t test"      # grouped tables only
+    already_log: bool = False         # grouped tables only: values are log2 already
+    p_input: str = "P value"          # XY tables only: Y holds P values or -log10(P)
+    label_top: int = 10
+    label_names: str = ""
+    up_color: str = "#C55C55"
+    down_color: str = "#1355AA"
+    ns_color: str = "#A6A6A6"
+    show_counts: bool = True
 
 
 @dataclass
@@ -147,6 +197,18 @@ class GroupedPlotOptions:
     plot_type: str = "Grouped bars"
     heat_cmap: str = "Viridis"
     heat_values: bool = False
+    heat_shape: str = "Squares"
+    circle_color: str = "Same as size"
+    circle_color_label: str = ""
+    arrangement: str = "Interleaved"
+    orientation: str = "Vertical"
+    whiskers: str = "Min to max"
+    right_series: tuple = ()          # data set names drawn on the right Y axis
+    right_label: str = ""
+    right_min: Optional[float] = None
+    right_max: Optional[float] = None
+    volcano: VolcanoOptions = None
+    view3d: "View3DOptions" = None
     error: str = "SEM"
     title: str = ""
     x_label: str = ""
@@ -176,6 +238,12 @@ class GroupedPlotOptions:
 
 @dataclass
 class XYPlotOptions:
+    plot_type: str = "Points and lines"
+    right_series: tuple = ()
+    right_label: str = ""
+    right_min: Optional[float] = None
+    right_max: Optional[float] = None
+    volcano: VolcanoOptions = None
     error: str = "SEM"
     error_display: str = "Shaded band"
     title: str = ""
@@ -231,11 +299,106 @@ def _new_axes(fig, opts):
     return fig.add_axes([1.4 / W, 1.0 / H, w / W, h / H])
 
 
-def _frame(ax, opts):
+def _frame(ax, opts, right_axis=False):
     box = opts.frame == "Box"
     ax.spines["top"].set_visible(box)
-    ax.spines["right"].set_visible(box)
-    ax.tick_params(top=box, right=box, labeltop=False, labelright=False)
+    ax.spines["right"].set_visible(box or right_axis)
+    ax.tick_params(top=box, right=box and not right_axis, labeltop=False, labelright=False)
+
+
+class _Flip:
+    """Axes stand-in for horizontal graphs: renderers draw as if vertical and every call is
+    passed on with X and Y swapped. Groups run top to bottom, values left to right."""
+
+    def __init__(self, ax):
+        self._ax = ax
+
+    def __getattr__(self, name):
+        return getattr(self._ax, name)
+
+    @property
+    def xaxis(self):
+        return self._ax.yaxis
+
+    @property
+    def yaxis(self):
+        return self._ax.xaxis
+
+    def set_xlim(self, lo, hi):
+        return self._ax.set_ylim(hi, lo)   # first group at the top
+
+    def set_ylim(self, *a, **k):
+        return self._ax.set_xlim(*a, **k)
+
+    def get_ylim(self):
+        return self._ax.get_xlim()
+
+    def get_xlim(self):
+        lo, hi = self._ax.get_ylim()
+        return hi, lo
+
+    def set_xticks(self, *a, **k):
+        return self._ax.set_yticks(*a, **k)
+
+    def set_yticks(self, *a, **k):
+        return self._ax.set_xticks(*a, **k)
+
+    def set_xticklabels(self, labels, **_k):   # angled names are not needed sideways
+        return self._ax.set_yticklabels(labels)
+
+    def set_xlabel(self, *a, **k):
+        return self._ax.set_ylabel(*a, **k)
+
+    def set_ylabel(self, *a, **k):
+        return self._ax.set_xlabel(*a, **k)
+
+    def bar(self, x, height, bottom=0, width=0.8, **k):
+        return self._ax.barh(x, height, left=bottom, height=width, **k)
+
+    def errorbar(self, x, y, yerr=None, **k):
+        return self._ax.errorbar(y, x, xerr=yerr, **k)
+
+    def hlines(self, y, xmin, xmax, **k):
+        return self._ax.vlines(y, xmin, xmax, **k)
+
+    def vlines(self, x, ymin, ymax, **k):
+        return self._ax.hlines(x, ymin, ymax, **k)
+
+    def plot(self, xs, ys, *a, **k):
+        return self._ax.plot(ys, xs, *a, **k)
+
+    def scatter(self, x, y, **k):
+        return self._ax.scatter(y, x, **k)
+
+    def fill_betweenx(self, y, x1, x2, **k):
+        return self._ax.fill_between(y, x1, x2, **k)
+
+    def fill_between(self, x, y1, y2=0, **k):
+        return self._ax.fill_betweenx(x, y1, y2, **k)
+
+    def axhline(self, y, **k):
+        return self._ax.axvline(y, **k)
+
+    def axvline(self, x, **k):
+        return self._ax.axhline(x, **k)
+
+    def boxplot(self, data, **k):
+        return self._ax.boxplot(data, orientation="horizontal", **k)
+
+    def text(self, x, y, s, ha="center", va="baseline", **k):
+        # Bracket labels turn with the brackets and sit to their right
+        return self._ax.text(y, x, s, rotation=270, ha="left" if va == "bottom" else "center",
+                             va="center", rotation_mode="anchor", **k)
+
+
+def _orient(ax, opts):
+    """(axes to draw on, horizontal?) for the graph's orientation setting."""
+    flip = getattr(opts, "orientation", "Vertical") == "Horizontal"
+    return (_Flip(ax) if flip else ax), flip
+
+
+def _real(ax):
+    return ax._ax if isinstance(ax, _Flip) else ax
 
 
 def nice_range(lo, hi, zero=True, headroom=1.1):
@@ -344,7 +507,7 @@ def _reference_lines(ax, opts, st, log_y=False):
                    zorder=0.5)
 
 
-def _legend(ax, handles, labels, opts, st):
+def _legend(ax, handles, labels, opts, st, ncol=None):
     pos = opts.legend
     if pos == "None" or not handles:
         return
@@ -361,7 +524,7 @@ def _legend(ax, handles, labels, opts, st):
         ax.legend(handles, labels, loc="upper right", **kw)
     elif pos == "Above plot":
         ax.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 1.02),
-                  ncol=min(2, len(handles)), **kw)
+                  ncol=ncol or min(2, len(handles)), **kw)
     elif pos == "Right of plot":
         ax.legend(handles, labels, loc="upper left", bbox_to_anchor=(1.02, 1.0), **kw)
     else:
@@ -372,11 +535,14 @@ def _extent(texts):
     return [t.get_window_extent() for t in texts if t.get_visible() and t.get_text()]
 
 
-def _finish(fig, ax, opts, st, side=()):
+def _finish(fig, ax, opts, st, side=(), twins=()):
     """Place axis titles and size the figure around the exact plotting area.
 
     side: (axes, gap_in, width_in) placed to the right of the plot, full height (color bars).
+    twins: axes that share the plotting area (a right Y axis).
     """
+    ax = _real(ax)
+    side = list(side) + [(t, None, None) for t in twins]
     if opts.title:
         y0, y1 = ax.get_ylim()
         top = getattr(ax, "stel_bracket_top", -math.inf)
@@ -409,7 +575,10 @@ def _finish(fig, ax, opts, st, side=()):
     fig.set_size_inches(W, H, forward=False)
     ax.set_position([left / W, bottom / H, w / W, h / H])
     for extra, gap, width in side:
-        extra.set_position([(left + w + gap) / W, bottom / H, width / W, h / H])
+        if gap is None:
+            extra.set_position([left / W, bottom / H, w / W, h / H])
+        else:
+            extra.set_position([(left + w + gap) / W, bottom / H, width / W, h / H])
 
 
 def _swarm_offsets(values, bin_height, step, max_half_width):
@@ -631,6 +800,7 @@ def render_column(fig, groups, opts, stats_result=None):
 
     ax = _new_axes(fig, opts)
     _frame(ax, opts)
+    ax, flip = _orient(ax, opts)
     k = len(data)
     xpos = np.arange(k)
     colors = palette_colors(opts.palette, k)
@@ -643,7 +813,10 @@ def render_column(fig, groups, opts, stats_result=None):
 
     x_lo, x_hi = -COLUMN_MARGIN, k - 1 + COLUMN_MARGIN
     ax.set_xlim(x_lo, x_hi)
+    # Lengths of the group axis and the value axis (swapped when the graph is horizontal)
     ax_w_pt, ax_h_pt = opts.width_in * 72, opts.height_in * 72
+    if flip:
+        ax_w_pt, ax_h_pt = ax_h_pt, ax_w_pt
     spacing_pt = ax_w_pt / (x_hi - x_lo)
     x_per_pt = 1.0 / spacing_pt
     capsize = 0.5 * COLUMN_CAP * bw * spacing_pt
@@ -715,7 +888,7 @@ def render_column(fig, groups, opts, stats_result=None):
             else:
                 ax.bar(i, centers[i] - base, bottom=base, width=bw, facecolor="none", edgecolor=c,
                        linewidth=lw, zorder=1)
-            draw_error(i, c, 2)
+            draw_error(i, c, Z_SUMMARY)
             if opts.show_points:
                 draw_points(i, v, c, 3)
 
@@ -725,15 +898,7 @@ def render_column(fig, groups, opts, stats_result=None):
                         whis=1.5 if tukey else (0, 100),
                         showfliers=tukey and not opts.show_points,
                         patch_artist=True, manage_ticks=False)
-        for i, c in enumerate(colors):
-            bp["boxes"][i].set(facecolor=to_rgba(c, alpha), edgecolor=c, linewidth=lw)
-            bp["medians"][i].set(color=c, linewidth=lw)
-            for part in ("whiskers", "caps"):
-                for line in bp[part][2 * i:2 * i + 2]:
-                    line.set(color=c, linewidth=lw)
-            if tukey and not opts.show_points and i < len(bp["fliers"]):
-                bp["fliers"][i].set(marker="o", markersize=ms * 0.8, markerfacecolor="none",
-                                    markeredgecolor=c, markeredgewidth=thin)
+        _style_boxes(bp, colors, alpha, lw, thin, ms, tukey and not opts.show_points)
         if opts.show_points:
             for i, ((_, v), c) in enumerate(zip(data, colors)):
                 draw_points(i, v, c, 3)
@@ -790,10 +955,12 @@ def render_column(fig, groups, opts, stats_result=None):
     ax.set_ylabel(opts.y_label)
     if opts.x_label:
         ax.set_xlabel(opts.x_label)
+    if flip:
+        _real(ax).tick_params(axis="y", pad=3)
     _finish(fig, ax, opts, st)
     if log_y:
-        _style_minor(ax, st)
-    return ax
+        _style_minor(_real(ax), st, "x" if flip else "y")
+    return _real(ax)
 
 
 # ---------------------------------------------------------------------------
@@ -924,23 +1091,74 @@ def _render_histogram(fig, groups, opts, st):
 # Grouped graphs (two-way layouts)
 # ---------------------------------------------------------------------------
 
-def render_grouped(fig, row_labels, col_names, D, opts, result=None):
+def _cell_summary(Dsrc, Dp, error, log_y):
+    """Mean and error distances per cell (rows x data sets), on the drawn scale."""
+    R, C, _ = Dsrc.shape
+    means = np.full((R, C), np.nan)
+    err_lo = np.zeros((R, C))
+    err_hi = np.zeros((R, C))
+    for r in range(R):
+        for c in range(C):
+            v = finite(Dsrc[r, c])
+            if v.size:
+                m, e = float(np.mean(v)), float(error_halfwidth(v, error))
+                if log_y:   # statistics on the original values, drawn on the log axis
+                    means[r, c] = math.log10(m) if m > 0 else np.nan
+                    if not np.isfinite(means[r, c]):
+                        continue
+                    err_lo[r, c] = (means[r, c] - math.log10(m - e) if (e > 0 and m - e > 0)
+                                    else (math.inf if e > 0 else 0.0))
+                    err_hi[r, c] = math.log10(m + e) - means[r, c] if e > 0 else 0.0
+                else:
+                    means[r, c], err_lo[r, c], err_hi[r, c] = m, e, e
+    return means, err_lo, err_hi
+
+
+def _value_axis(ax, lows, highs, user_min, user_max, log_y, zero=True):
+    if log_y:
+        return _log_axis(ax, min(lows), max(highs), user_min, user_max)
+    return _set_axis(ax, "y", min(lows), max(highs), user_min, user_max, zero=zero)
+
+
+def render_grouped(fig, row_labels, col_names, D, opts, result=None, color_source=None):
     """Clustered graphs: one cluster per row, one color per data set.
 
-    D has shape rows x data sets x replicates (NaN for blanks).
+    D has shape rows x data sets x replicates (NaN for blanks). color_source, optional, is
+    another grouped table (row labels, data set names, values) whose cell means color the
+    circles of a circle heat map.
     """
     from .anova import clean_grouped
 
     fig.clear()
     fig.stel_notes = []
+    fig.stel_volcano = None
     st = apply_lab_style(opts.font_size, opts.bold, opts.style)
     row_labels, col_names, D = clean_grouped(row_labels, col_names, D)
     if not row_labels:
         _empty_state(fig, "Enter a label for each row and\nreplicate values for each data set.", opts)
         return None
-    if opts.plot_type == HEAT_MAP:
-        return _render_heatmap(fig, row_labels, col_names, D, opts, st)
+    pt = opts.plot_type
+    if pt == HEAT_MAP:
+        return _render_heatmap(fig, row_labels, col_names, D, opts, st, color_source)
+    if pt == VOLCANO:
+        from .volcano import render_grouped_volcano
+        return render_grouped_volcano(fig, row_labels, col_names, D, opts, st)
+    if pt == BARS_3D:
+        from .plot3d import render_grouped_bars3d
+        return render_grouped_bars3d(fig, row_labels, col_names, D, opts, st)
+
+    box = pt == GROUPED_BOX
+    area = pt == AREA
+    line = pt.startswith("Line")
+    scatter = pt == "Grouped scatter dot plot"
+    arrangement = opts.arrangement if pt in ("Grouped bars", AREA) else "Interleaved"
+    if area and arrangement not in ("Stacked", "Superimposed"):
+        arrangement = "Superimposed"
+    stacked = arrangement == "Stacked"
     log_y = bool(getattr(opts, "log_y", False))
+    if log_y and stacked:
+        fig.stel_notes.append("Stacked graphs use a linear Y axis; the log scale setting is ignored.")
+        log_y = False
     Dsrc, Dp = D, D
     if log_y:
         dropped = int(np.sum(np.isfinite(D) & (D <= 0)))
@@ -949,77 +1167,170 @@ def render_grouped(fig, row_labels, col_names, D, opts, result=None):
                                   "the statistics still include them.")
         Dsrc = np.where(np.isfinite(D) & (D > 0), D, np.nan)
         Dp = _log10_pos(D)
-    ax = _new_axes(fig, opts)
-    _frame(ax, opts)
+
     R, C, _ = D.shape
+    flip = getattr(opts, "orientation", "Vertical") == "Horizontal"
+    right = [c for c, n in enumerate(col_names) if n in set(opts.right_series or ())]
+    if right and (pt not in RIGHT_AXIS_TYPES or flip or stacked or arrangement == "Separated"):
+        fig.stel_notes.append("A right Y axis is available for vertical interleaved or superimposed "
+                              "bars, scatter, line, and area graphs; all data sets use the left axis.")
+        right = []
+    if right and len(right) == C:
+        right = right[1:] if C > 1 else []
+    on_right = np.array([c in right for c in range(C)])
+
+    fig_ax = _new_axes(fig, opts)
+    _frame(fig_ax, opts, right_axis=bool(right))
+    ax = _Flip(fig_ax) if flip else fig_ax
+    ax2 = fig_ax.twinx() if right else None
+    if ax2 is not None:
+        ax2.spines["top"].set_visible(opts.frame == "Box")
+        ax2.spines["left"].set_visible(False)
     colors = palette_colors(opts.palette, C)
     ms = opts.point_size
-    line = opts.plot_type.startswith("Line")
     alpha, lw, thin = st["fill_alpha"], st["data_line"], st["thin"]
     filled = opts.marker_fill != "Open"
-    slot = GROUP_SPAN / C
-    offsets = (np.arange(C) - (C - 1) / 2.0) * (0.06 if line else slot)
-    bar_w = slot * GROUP_BAR
+    show_points = (opts.show_points or scatter) and not (stacked or area)
 
-    x_lo, x_hi = -GROUP_MARGIN, R - 1 + GROUP_MARGIN
+    # Where each bar or point cluster sits along the group axis
+    slot = GROUP_SPAN / C
+    if arrangement == "Separated":
+        gap = 1.0
+        xmat = np.array([[c * (R + gap) + r for c in range(C)] for r in range(R)], float)
+        bar_w = GROUP_BAR * 0.8
+        x_lo, x_hi = -GROUP_MARGIN, (C - 1) * (R + gap) + R - 1 + GROUP_MARGIN
+        ticks, tick_labels = xmat.T.ravel(), [row_labels[r] for c in range(C) for r in range(R)]
+        if not flip and max(len(t) for t in tick_labels) * R * C * opts.font_size * 0.55 > \
+                opts.width_in * 72 * 0.9:
+            from dataclasses import replace
+            opts = replace(opts, rotate_labels=True)   # long names would run into each other
+    else:
+        if arrangement in ("Stacked", "Superimposed") or area:
+            offsets = np.zeros(C)
+            bar_w = GROUP_SPAN * GROUP_BAR
+        else:
+            offsets = (np.arange(C) - (C - 1) / 2.0) * (0.06 if line else slot)
+            bar_w = slot * GROUP_BAR
+        xmat = np.arange(R)[:, None] + offsets[None, :]
+        x_lo, x_hi = ((-0.15, R - 0.85) if (area and R > 1) else (-GROUP_MARGIN, R - 1 + GROUP_MARGIN))
+        ticks, tick_labels = np.arange(R), list(row_labels)
     ax.set_xlim(x_lo, x_hi)
+    ax2 is not None and ax2.set_xlim(x_lo, x_hi)
     ax_w_pt, ax_h_pt = opts.width_in * 72, opts.height_in * 72
+    if flip:
+        ax_w_pt, ax_h_pt = ax_h_pt, ax_w_pt
     x_per_pt = (x_hi - x_lo) / ax_w_pt
     capsize = 0.5 * GROUP_CAP * bar_w / x_per_pt
 
-    means = np.full((R, C), np.nan)
-    err_lo = np.zeros((R, C))
-    err_hi = np.zeros((R, C))
-    tops = np.full((R, C), -np.inf)
+    means, err_lo, err_hi = _cell_summary(Dsrc, Dp, opts.error, log_y)
+    bottoms = np.zeros((R, C))
+    if stacked:
+        run = np.zeros(R)
+        for c in range(C):
+            bottoms[:, c] = run
+            run = run + np.nan_to_num(means[:, c])
+        err_lo = np.zeros((R, C))   # stacked segments show the upward error only
+    tops = bottoms + means + err_hi
     for r in range(R):
         for c in range(C):
-            v = finite(Dsrc[r, c])
-            if v.size:
-                m, e = float(np.mean(v)), float(error_halfwidth(v, opts.error))
-                if log_y:   # statistics on the original values, drawn on the log axis
-                    means[r, c] = math.log10(m)
-                    err_lo[r, c] = (means[r, c] - math.log10(m - e) if (e > 0 and m - e > 0)
-                                    else (math.inf if e > 0 else 0.0))
-                    err_hi[r, c] = math.log10(m + e) - means[r, c] if e > 0 else 0.0
-                else:
-                    means[r, c], err_lo[r, c], err_hi[r, c] = m, e, e
-                tops[r, c] = means[r, c] + err_hi[r, c]
-                if opts.show_points or opts.plot_type == "Grouped scatter dot plot":
-                    tops[r, c] = max(tops[r, c], float(finite(Dp[r, c]).max()))
-    vals = finite(Dp)
-    bottoms = (means - err_lo)[np.isfinite(means - err_lo)]
-    lows = ([float(vals.min())] if (log_y or opts.show_points or opts.plot_type != "Grouped bars")
-            else [0.0]) + ([float(bottoms.min())] if bottoms.size else [])
-    if log_y:
-        y0, y1 = _log_axis(ax, min(lows), float(np.max(tops[np.isfinite(tops)])),
-                           opts.y_min, opts.y_max)
-        err_lo = np.where(np.isfinite(err_lo), err_lo, means - (y0 - 1.0))
-    else:
-        y0, y1 = _set_axis(ax, "y", min(lows), float(np.max(tops[np.isfinite(tops)])),
-                           opts.y_min, opts.y_max)
-    base = y0 if log_y else 0.0
+            v = finite(Dp[r, c])
+            if v.size and (show_points or box):
+                tops[r, c] = max(tops[r, c], float(v.max())) if np.isfinite(tops[r, c]) else float(v.max())
 
-    if result is not None and result.ok and opts.annotation != "None" and not line:
+    def axis_range(cols):
+        sel = [c for c in range(C) if (c in cols)]
+        vals = finite(Dp[:, sel, :])
+        t = tops[:, sel]
+        t = t[np.isfinite(t)]
+        b = (bottoms + means - err_lo)[:, sel]
+        b = b[np.isfinite(b)]
+        lows = []
+        if log_y or show_points or box or line or scatter:
+            lows.append(float(vals.min()) if vals.size else 0.0)
+        else:
+            lows.append(0.0)
+        if b.size:
+            lows.append(float(b.min()))
+        if box:
+            lows = [float(vals.min())] if vals.size else [0.0]
+        return lows, [float(t.max()) if t.size else 1.0]
+
+    left_cols = [c for c in range(C) if not on_right[c]]
+    lows, highs = axis_range(left_cols)
+    y0, y1 = _value_axis(ax, lows, highs, opts.y_min, opts.y_max, log_y, zero=not box)
+    if ax2 is not None:
+        lows2, highs2 = axis_range(right)
+        r0, r1 = _value_axis(ax2, lows2, highs2, opts.right_min, opts.right_max, log_y, zero=not box)
+    base = y0 if log_y else 0.0
+    err_lo = np.where(np.isfinite(err_lo), err_lo, means - (y0 - 1.0))
+
+    brackets_ok = (arrangement == "Interleaved" and not line and not area and not right)
+    if result is not None and result.ok and opts.annotation != "None" and brackets_ok:
         families = {}
         for comp in result.comparisons:
             if comp.cluster >= 0 and (opts.show_ns or comp.p < 0.05):
                 families.setdefault(comp.cluster, []).append(comp)
-        fams = [(comps, (lambda r: (lambda c: r + offsets[c]))(r),
+        fams = [(comps, (lambda r: (lambda c: float(xmat[r, c])))(r),
                  {c: tops[r, c] for c in range(C) if np.isfinite(tops[r, c])})
                 for r, comps in families.items()]
         if fams:
             y0, y1 = _place_brackets(ax, fams, opts, st, y0, y1, ax_h_pt, x_per_pt)
-    y_per_pt = (y1 - y0) / ax_h_pt
+    elif result is not None and result.ok and opts.annotation != "None" and result.comparisons \
+            and not line:
+        fig.stel_notes.append("Comparison brackets are drawn only on interleaved graphs with one "
+                              "Y axis.")
 
+    def y_per_pt_of(c):
+        if on_right[c]:
+            a, b = ax2.get_ylim()
+            return (b - a) / ax_h_pt
+        return (y1 - y0) / ax_h_pt
+
+    rank = np.argsort(np.argsort(-np.nan_to_num(means, nan=-np.inf), axis=1), axis=1)
+    area_rank = np.argsort(np.argsort(-np.nanmean(np.where(np.isfinite(means), means, np.nan), axis=0)))
     handles = []
     for c, color in enumerate(colors):
-        xs = np.arange(R) + offsets[c]
+        target = ax2 if on_right[c] else ax
+        xs = xmat[:, c]
         ok = np.isfinite(means[:, c])
-        if opts.plot_type == "Grouped bars":
+        z_off = c * 0.01 if arrangement == "Superimposed" else 0.0
+        if pt == "Grouped bars":
             face = to_rgba(color, alpha) if opts.bar_style == "Filled" else "none"
-            ax.bar(xs[ok], means[ok, c] - base, bottom=base, width=bar_w, facecolor=face,
-                   edgecolor=color, linewidth=thin if opts.bar_style == "Filled" else lw, zorder=1)
+            if arrangement == "Superimposed" and opts.bar_style == "Filled":
+                face = _opaque(face)   # overlapping see-through fills would mix colors
+            heights = means[:, c] - (0 if stacked else base)
+            for r in np.nonzero(ok)[0]:
+                # Superimposed: shorter bars sit in front of taller ones
+                z = 1.1 + 0.4 * rank[r, c] / max(C - 1, 1) if arrangement == "Superimposed" else 1
+                target.bar(xs[r], heights[r], bottom=bottoms[r, c] if stacked else base, width=bar_w,
+                           facecolor=face, edgecolor=color,
+                           linewidth=thin if opts.bar_style == "Filled" else lw, zorder=z)
             handles.append(Rectangle((0, 0), 1, 1, facecolor=face, edgecolor=color,
+                                     linewidth=thin))
+        elif area:
+            lo_edge = bottoms[:, c] if stacked else np.full(R, base)
+            hi_edge = bottoms[:, c] + means[:, c]
+            if stacked:
+                fill, z_fill = to_rgba(color, alpha), 1
+            else:   # solid fills, largest area at the back, so each area keeps its own color
+                fill, z_fill = _opaque(to_rgba(color, alpha)), 1.1 + 0.4 * area_rank[c] / max(C - 1, 1)
+            target.fill_between(xs[ok], lo_edge[ok], hi_edge[ok], facecolor=fill,
+                                edgecolor="none", linewidth=0, zorder=z_fill)
+            target.plot(xs[ok], hi_edge[ok], color=color, linewidth=lw, zorder=2 + z_off,
+                        clip_on=False)
+            handles.append(Rectangle((0, 0), 1, 1, facecolor=to_rgba(color, alpha), edgecolor=color,
+                                     linewidth=thin))
+        elif box:
+            cells = [(xs[r], finite(Dp[r, c])) for r in range(R) if finite(Dp[r, c]).size]
+            if cells:
+                tukey = getattr(opts, "whiskers", "Min to max").startswith("Tukey")
+                bp = target.boxplot([v for _, v in cells], positions=[x for x, _ in cells],
+                                    widths=bar_w, whis=1.5 if tukey else (0, 100),
+                                    showfliers=tukey and not opts.show_points, patch_artist=True,
+                                    manage_ticks=False)
+                _style_boxes(bp, [color] * len(cells), alpha, lw, thin, ms,
+                             tukey and not opts.show_points)
+            handles.append(Rectangle((0, 0), 1, 1, facecolor=to_rgba(color, alpha), edgecolor=color,
                                      linewidth=thin))
         elif line:
             code = marker_for(opts.marker, c, st)
@@ -1027,11 +1338,11 @@ def render_grouped(fig, row_labels, col_names, D, opts, result=None):
                       markerfacecolor=color if filled else "none",
                       markeredgecolor="none" if filled else color,
                       markeredgewidth=0 if filled else st["marker_edge"])
-            ax.plot(xs[ok], means[ok, c], color=color, linewidth=thin, zorder=3, **mk)
+            target.plot(xs[ok], means[ok, c], color=color, linewidth=thin, zorder=Z_SUMMARY, **mk)
             handles.append(Line2D([], [], color=color, linewidth=thin, **mk))
         else:
-            ax.hlines(means[ok, c], xs[ok] - bar_w / 2, xs[ok] + bar_w / 2, colors=[color],
-                      linewidth=lw, zorder=4)
+            target.hlines(means[ok, c], xs[ok] - bar_w / 2, xs[ok] + bar_w / 2, colors=[color],
+                          linewidth=lw, zorder=Z_SUMMARY)
             code = marker_for(opts.marker, c, st)
             handles.append(Line2D([], [], color=color, linestyle="none", marker=code,
                                   markersize=marker_size(ms, code, st),
@@ -1039,40 +1350,132 @@ def render_grouped(fig, row_labels, col_names, D, opts, result=None):
                                   markeredgecolor="none" if filled else color,
                                   markeredgewidth=0 if filled else st["marker_edge"]))
         err_ok = ok & ((err_lo[:, c] > 0) | (err_hi[:, c] > 0))
-        if err_ok.any():
-            _style_errorbar(ax.errorbar(xs[err_ok], means[err_ok, c],
-                                        yerr=[err_lo[err_ok, c], err_hi[err_ok, c]], fmt="none",
-                                        ecolor=color, elinewidth=lw, capsize=capsize, capthick=lw,
-                                        zorder=2), opts)
-        if opts.show_points or opts.plot_type == "Grouped scatter dot plot":
+        if err_ok.any() and not (box or area):
+            centers = bottoms[:, c] + means[:, c]
+            _style_errorbar(target.errorbar(xs[err_ok], centers[err_ok],
+                                            yerr=[err_lo[err_ok, c], err_hi[err_ok, c]], fmt="none",
+                                            ecolor=color, elinewidth=lw, capsize=capsize,
+                                            capthick=lw, zorder=Z_SUMMARY + z_off), opts)
+        if show_points:
+            ypp = y_per_pt_of(c)
             for r in range(R):
                 v = finite(Dp[r, c])
                 if v.size == 0:
                     continue
                 offs = (np.zeros(v.size) if line else
-                        _swarm_offsets(v, ms * y_per_pt, 1.41 * ms * x_per_pt, bar_w * 0.4))
-                _scatter(ax, xs[r] + offs, v, color, marker_for(opts.marker, c, st), ms, filled,
-                         st, 3)
+                        _swarm_offsets(v, ms * ypp, 1.41 * ms * x_per_pt, bar_w * 0.4))
+                _scatter(target, xs[r] + offs, v, color, marker_for(opts.marker, c, st), ms, filled,
+                         st, Z_POINTS)
 
     _reference_lines(ax, opts, st, log_y=log_y)
-    ax.set_xticks(np.arange(R))
+    ax.set_xticks(ticks)
     if opts.rotate_labels:
-        ax.set_xticklabels(row_labels, rotation=45, ha="right", rotation_mode="anchor")
+        ax.set_xticklabels(tick_labels, rotation=45, ha="right", rotation_mode="anchor")
     else:
-        ax.set_xticklabels(row_labels)
+        ax.set_xticklabels(tick_labels)
     ax.set_ylabel(opts.y_label)
     if opts.x_label:
         ax.set_xlabel(opts.x_label)
-    _legend(ax, handles, col_names, opts, st)
-    _finish(fig, ax, opts, st)
+    if ax2 is not None:
+        ax2.set_ylabel(opts.right_label or ", ".join(col_names[c] for c in right))
+        ax2.tick_params(axis="y", direction=st["tick_dir"], length=st["tick_len"],
+                        width=st["axis_line"])
+    if flip:
+        fig_ax.tick_params(axis="y", pad=3)
+    if arrangement == "Separated" and C > 1:
+        # Name each block of bars beside the plot, across from its bars
+        for c in range(C):
+            mid = c * (R + 1.0) + (R - 1) / 2.0
+            if flip:
+                fig_ax.annotate(col_names[c], xy=(1, mid), xycoords=("axes fraction", "data"),
+                                xytext=(4, 0), textcoords="offset points", rotation=270,
+                                ha="center", va="center", fontsize=opts.font_size + st["title_extra"])
+            else:
+                fig_ax.annotate(col_names[c], xy=(mid, 1), xycoords=("data", "axes fraction"),
+                                xytext=(0, 4), textcoords="offset points", ha="center",
+                                va="bottom", fontsize=opts.font_size + st["title_extra"])
+    elif opts.legend != "None":
+        lopts = opts
+        if flip and opts.legend.startswith("Inside"):
+            from dataclasses import replace
+            lopts = replace(opts, legend="Right of plot")   # bars start at the left edge
+        _legend(fig_ax, handles, col_names, lopts, st)
+    _finish(fig, fig_ax, opts, st, twins=[ax2] if ax2 is not None else ())
     if log_y:
-        _style_minor(ax, st)
-    return ax
+        _style_minor(fig_ax, st, "x" if flip else "y")
+        if ax2 is not None:
+            _style_minor(ax2, st, "y")
+    return fig_ax
 
 
-def _render_heatmap(fig, row_labels, col_names, D, opts, st):
-    """Cell means as colors (rows x data sets), with a color bar."""
+def _opaque(rgba):
+    """A see-through color as the solid color it shows on white."""
+    r, g, b, a = rgba
+    return (r * a + 1 - a, g * a + 1 - a, b * a + 1 - a, 1.0)
+
+
+def match_cells(row_labels, col_names, source):
+    """Cell means of another grouped table lined up with these rows and data sets: matched by
+    row label and data set name where they agree, otherwise by position. NaN where missing."""
+    src_rows, src_cols, src = source
+    src = np.asarray(src, float)
+    R, C = len(row_labels), len(col_names)
+    out = np.full((R, C), np.nan)
+    row_index = {lab: i for i, lab in enumerate(src_rows)}
+    col_index = {name: j for j, name in enumerate(src_cols)}
+    by_label = all(lab in row_index for lab in row_labels)
+    by_name = all(name in col_index for name in col_names)
+    for r, lab in enumerate(row_labels):
+        i = row_index[lab] if by_label else r
+        for c, name in enumerate(col_names):
+            j = col_index[name] if by_name else c
+            if i < src.shape[0] and j < src.shape[1]:
+                v = finite(src[i, j])
+                if v.size:
+                    out[r, c] = float(np.mean(v))
+    return out
+
+
+def colormap(name):
+    """A heat map color scale: a built-in map, or a custom color scheme run as a gradient."""
     import matplotlib
+    from matplotlib.colors import LinearSegmentedColormap
+    from .lab_style import CUSTOM_PALETTES
+    if name in CUSTOM_PALETTES and len(CUSTOM_PALETTES[name]) >= 2:
+        return LinearSegmentedColormap.from_list(name, CUSTOM_PALETTES[name])
+    return matplotlib.colormaps[HEAT_MAPS.get(name, "viridis")].copy()
+
+
+def heat_map_names():
+    from .lab_style import CUSTOM_PALETTES
+    return list(HEAT_MAPS) + [n for n, cols in CUSTOM_PALETTES.items() if len(cols) >= 2]
+
+
+def circle_color_values(D, choice, color_source=None, row_labels=None, col_names=None):
+    """The value that colors each circle: the cell mean, a spread measure, n, or another table."""
+    R, C, _ = D.shape
+    if choice not in CIRCLE_COLORS[1:]:
+        if color_source is not None:
+            return match_cells(row_labels, col_names, color_source)
+        choice = "Same as size"
+    out = np.full((R, C), np.nan)
+    for r in range(R):
+        for c in range(C):
+            v = finite(D[r, c])
+            if not v.size:
+                continue
+            m = float(np.mean(v))
+            sd = float(np.std(v, ddof=1)) if v.size > 1 else np.nan
+            out[r, c] = {"Same as size": m, "SD": sd,
+                         "SEM": sd / math.sqrt(v.size) if v.size > 1 else np.nan,
+                         "Number of values": float(v.size),
+                         "Coefficient of variation": (100 * sd / m if m else np.nan)}[choice]
+    return out
+
+
+def _render_heatmap(fig, row_labels, col_names, D, opts, st, color_source=None):
+    """Cell means as colors (rows x data sets), with a color bar. As circles, each circle's area
+    shows the cell mean and its color shows a second value."""
     R, C, _ = D.shape
     means = np.full((R, C), np.nan)
     for r in range(R):
@@ -1080,16 +1483,51 @@ def _render_heatmap(fig, row_labels, col_names, D, opts, st):
             v = finite(D[r, c])
             if v.size:
                 means[r, c] = float(np.mean(v))
+    circles = getattr(opts, "heat_shape", "Squares") == "Circles"
+    shade_by = means
+    color_title = opts.y_label
+    if circles:
+        choice = getattr(opts, "circle_color", "Same as size")
+        shade_by = circle_color_values(D, choice, color_source, row_labels, col_names)
+        if choice != "Same as size":
+            color_title = getattr(opts, "circle_color_label", "") or (
+                choice if choice in CIRCLE_COLORS else choice.replace("Table: ", ""))
     ax = _new_axes(fig, opts)
-    cmap = matplotlib.colormaps[HEAT_MAPS.get(opts.heat_cmap, "viridis")].copy()
+    cmap = colormap(opts.heat_cmap)
     cmap.set_bad("#e6e6e6")
-    finite_means = means[np.isfinite(means)]
-    vmin = opts.y_min if opts.y_min is not None else float(finite_means.min())
-    vmax = opts.y_max if opts.y_max is not None else float(finite_means.max())
+    finite_shade = shade_by[np.isfinite(shade_by)]
+    if not finite_shade.size:
+        finite_shade = np.array([0.0, 1.0])
+        fig.stel_notes.append("No color values for these cells; check the circle color setting.")
+    vmin = opts.y_min if opts.y_min is not None else float(finite_shade.min())
+    vmax = opts.y_max if opts.y_max is not None else float(finite_shade.max())
     if vmax <= vmin:
         vmax = vmin + 1.0
-    im = ax.imshow(np.ma.masked_invalid(means), cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto",
-                   interpolation="nearest")
+    if circles:
+        from matplotlib.colors import Normalize
+        cell_pt = min(opts.width_in * 72 / C, opts.height_in * 72 / R)
+        d_max = 0.92 * cell_pt
+        big = float(np.nanmax(np.abs(means))) if np.isfinite(means).any() else 1.0
+        big = big or 1.0
+        if np.any(means[np.isfinite(means)] < 0):
+            fig.stel_notes.append("Circle sizes show the size of each mean; negative means are "
+                                  "drawn by their absolute value.")
+        rr, cc = np.nonzero(np.isfinite(means))
+        sizes = (d_max * np.sqrt(np.abs(means[rr, cc]) / big)) ** 2
+        colors_now = shade_by[rr, cc]
+        norm = Normalize(vmin, vmax)
+        face = [cmap(norm(v)) if np.isfinite(v) else cmap.get_bad() for v in colors_now]
+        ax.scatter(cc, rr, s=sizes, c=face, edgecolors="none", zorder=2)
+        ax.set_xlim(-0.5, C - 0.5)
+        ax.set_ylim(R - 0.5, -0.5)
+        from matplotlib.cm import ScalarMappable
+        im = ScalarMappable(norm=norm, cmap=cmap)
+        ax.set_aspect("auto")
+        ax.grid(which="minor", color="#d9d9d9", linewidth=st["thin"])
+    else:
+        im = ax.imshow(np.ma.masked_invalid(shade_by), cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto",
+                       interpolation="nearest")
+        ax.grid(which="minor", color="white", linewidth=st["axis_line"] * 1.5)
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.set_xticks(np.arange(C))
@@ -1102,9 +1540,8 @@ def _render_heatmap(fig, row_labels, col_names, D, opts, st):
     ax.tick_params(which="major", length=0)
     ax.set_xticks(np.arange(C + 1) - 0.5, minor=True)
     ax.set_yticks(np.arange(R + 1) - 0.5, minor=True)
-    ax.grid(which="minor", color="white", linewidth=st["axis_line"] * 1.5)
     ax.tick_params(which="minor", length=0)
-    if opts.heat_values:
+    if opts.heat_values and not circles:
         for r in range(R):
             for c in range(C):
                 if np.isfinite(means[r, c]):
@@ -1118,11 +1555,27 @@ def _render_heatmap(fig, row_labels, col_names, D, opts, st):
     cb = fig.colorbar(im, cax=cax)
     cb.outline.set_linewidth(st["axis_line"])
     cb.ax.tick_params(width=st["axis_line"], length=st["tick_len"], labelsize=opts.font_size)
-    cb.set_label(opts.y_label, fontsize=opts.font_size + st["title_extra"])
+    cb.set_label(color_title, fontsize=opts.font_size + st["title_extra"])
+    side = [(cax, gap, bar_w)]
+    if circles:
+        # Size key: three circles at round values up to the largest mean
+        lax = fig.add_axes([0.9, 0.1, 0.05, 0.5])
+        lax.set_axis_off()
+        steps = MaxNLocator(nbins=4, steps=NICE_STEPS).tick_values(0, big)
+        keys = [v for v in steps if 0 < v <= big * 1.0001][-3:] or [big]
+        handles = [Line2D([], [], linestyle="none", marker="o", markeredgecolor="none",
+                          markerfacecolor="#7f7f7f", markersize=d_max * math.sqrt(v / big))
+                   for v in keys]
+        lax.legend(handles, [f"{v:g}" for v in keys], loc="upper left", frameon=False,
+                   title=opts.y_label, title_fontsize=opts.font_size + st["title_extra"],
+                   fontsize=opts.font_size, labelspacing=0.75 * d_max / opts.font_size,
+                   handlelength=d_max / opts.font_size, borderaxespad=0, handletextpad=0.8,
+                   alignment="left")
+        side.append((lax, gap + bar_w + 0.75, 0.3))
     if opts.x_label:
         ax.set_xlabel(opts.x_label)
     fig.stel_heatmap = means
-    _finish(fig, ax, opts, st, side=[(cax, gap, bar_w)])
+    _finish(fig, ax, opts, st, side=side)
     return ax
 
 
@@ -1148,11 +1601,17 @@ def xy_summary(x, y_matrix, error_kind):
     return arr[:, 0], arr[:, 1], arr[:, 2], arr[:, 3]
 
 
-def render_xy(fig, x, series, opts, fits=None):
-    """XY graph. series: list of (name, y_matrix rows x replicates)."""
+def render_xy(fig, x, series, opts, fits=None, row_titles=None):
+    """XY graph. series: list of (name, y_matrix rows x replicates). row_titles (optional)
+    label points on a volcano plot."""
     fig.clear()
     fig.stel_notes = []
+    fig.stel_volcano = None
     st = apply_lab_style(opts.font_size, opts.bold, opts.style)
+    if getattr(opts, "plot_type", "") == VOLCANO:
+        from .volcano import render_xy_volcano
+        return render_xy_volcano(fig, x, series, opts, st, row_titles)
+    area = getattr(opts, "plot_type", "") == AREA
     fits = {f.series: f for f in (fits or [])}
     log_y = bool(getattr(opts, "log_y", False))
     plotted, dropped = [], 0
@@ -1174,19 +1633,35 @@ def render_xy(fig, x, series, opts, fits=None):
         _empty_state(fig, "Enter X values in the first column\nand Y replicates beside them.", opts)
         return None
 
-    ax = _new_axes(fig, opts)
-    _frame(ax, opts)
+    right_names = set(getattr(opts, "right_series", ()) or ())
+    on_right = [name in right_names for name, *_ in plotted]
+    if all(on_right):
+        on_right = [False] + on_right[1:]
+    has_right = any(on_right)
+    main = _new_axes(fig, opts)
+    _frame(main, opts, right_axis=has_right)
+    ax2 = main.twinx() if has_right else None
+    if ax2 is not None:
+        ax2.spines["top"].set_visible(opts.frame == "Box")
+        ax2.spines["left"].set_visible(False)
     colors = palette_colors(opts.palette, len(plotted))
     lw, thin = st["data_line"], st["thin"]
     handles = []
-    y_floor = None
-    if log_y:
-        ax.set_yscale("log")
-        lows = np.concatenate([np.where(p[2] - p[3] > 0, p[2] - p[3], p[2]) for p in plotted])
-        y_floor = (opts.y_min if opts.y_min is not None and opts.y_min > 0
-                   else 10.0 ** math.floor(math.log10(float(lows.min()))))
+    y_floor = {}
+    for side, target in ((False, main), (True, ax2)):
+        if log_y and target is not None:
+            target.set_yscale("log")
+            sel = [p for p, r in zip(plotted, on_right) if r == side]
+            if not sel:
+                continue
+            lows = np.concatenate([np.where(p[2] - p[3] > 0, p[2] - p[3], p[2]) for p in sel])
+            user = opts.right_min if side else opts.y_min
+            y_floor[side] = (user if user is not None and user > 0
+                             else 10.0 ** math.floor(math.log10(float(lows.min()))))
     for k, ((name, xs, mean, err), c) in enumerate(zip(plotted, colors)):
-        lower = np.maximum(mean - err, y_floor) if log_y else mean - err
+        ax = ax2 if on_right[k] else main
+        floor = y_floor.get(on_right[k])
+        lower = np.maximum(mean - err, floor) if log_y else mean - err
         marker = marker_for(opts.marker, k, st)
         size = marker_size(opts.point_size, marker, st)
         filled = opts.marker_fill == "Filled"
@@ -1197,6 +1672,10 @@ def render_xy(fig, x, series, opts, fits=None):
         fit = fits.get(name)
         has_fit = fit is not None and fit.ok
         show_err = np.any(err > 0)
+        if area:
+            base = floor if log_y else 0.0
+            ax.fill_between(xs, np.full(xs.size, base), mean, facecolor=to_rgba(c, st["fill_alpha"]),
+                            edgecolor="none", linewidth=0, zorder=0.8 + 0.01 * k)
         if show_err and opts.error_display == "Shaded band":
             fill, edge = band_colors(c)
             ax.fill_between(xs, lower, mean + err, facecolor=fill, edgecolor="none",
@@ -1219,9 +1698,8 @@ def render_xy(fig, x, series, opts, fits=None):
             with np.errstate(all="ignore"):
                 ax.plot(grid, fit.predict(grid), color=c, linewidth=lw, zorder=2)
 
+    ax = main
     all_x = np.concatenate([p[1] for p in plotted])
-    lo_y = min(float(np.min(p[2] - p[3])) for p in plotted)
-    hi_y = max(float(np.max(p[2] + p[3])) for p in plotted)
     if opts.log_x:
         ax.set_xscale("log")
         ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
@@ -1229,22 +1707,38 @@ def render_xy(fig, x, series, opts, fits=None):
             ax.set_xlim(left=opts.x_min, right=opts.x_max)
     else:
         _set_axis(ax, "x", float(all_x.min()), float(all_x.max()), opts.x_min, opts.x_max)
-    if log_y:
-        top = (opts.y_max if opts.y_max is not None and opts.y_max > y_floor
-               else 10.0 ** math.ceil(math.log10(hi_y)))
-        ax.set_ylim(y_floor, top)
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
-        ax.yaxis.set_minor_formatter(NullFormatter())
-    else:
-        _set_axis(ax, "y", lo_y, hi_y, opts.y_min, opts.y_max)
+    for side, target in ((False, main), (True, ax2)):
+        sel = [p for p, r in zip(plotted, on_right) if r == side]
+        if target is None or not sel:
+            continue
+        lo_y = min(float(np.min(p[2] - p[3])) for p in sel)
+        hi_y = max(float(np.max(p[2] + p[3])) for p in sel)
+        if area and not log_y:
+            lo_y = min(lo_y, 0.0)
+        user_min, user_max = (opts.right_min, opts.right_max) if side else (opts.y_min, opts.y_max)
+        if log_y:
+            floor = y_floor[side]
+            top = (user_max if user_max is not None and user_max > floor
+                   else 10.0 ** math.ceil(math.log10(hi_y)))
+            target.set_ylim(floor, top)
+            target.yaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
+            target.yaxis.set_minor_formatter(NullFormatter())
+        else:
+            _set_axis(target, "y", lo_y, hi_y, user_min, user_max)
     _reference_lines(ax, opts, st)
     ax.set_xlabel(opts.x_label)
     ax.set_ylabel(opts.y_label)
+    if ax2 is not None:
+        ax2.set_ylabel(opts.right_label or ", ".join(p[0] for p, r in zip(plotted, on_right) if r))
+        ax2.tick_params(axis="y", direction=st["tick_dir"], length=st["tick_len"],
+                        width=st["axis_line"])
     if len(plotted) > 1:
         _legend(ax, handles, [p[0] for p in plotted], opts, st)
-    _finish(fig, ax, opts, st)
+    _finish(fig, ax, opts, st, twins=[ax2] if ax2 is not None else ())
     if log_y:
         _style_minor(ax, st, "y")
+        if ax2 is not None:
+            _style_minor(ax2, st, "y")
     if opts.log_x:
         _style_minor(ax, st, "x")
     return ax

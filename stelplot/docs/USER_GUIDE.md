@@ -22,6 +22,8 @@ This guide walks through entering data, making graphs, choosing and reading stat
 
 **XY table.** Use when X is a number on a scale, such as concentration, time, or distance, and you want to see how Y changes with X. Each data set can hold replicate Y columns. This is the table for curve fitting.
 
+**3D table.** Use when each point has three coordinates (X, Y, and Z), such as a response measured across two conditions, or principal component scores. A fourth column, optional, colors each point or surface patch on a color scale.
+
 A quick test: if the X axis would show category names, use a Column or Grouped table. If it would show numbers on a scale, use an XY table.
 
 ## Entering and managing data
@@ -66,6 +68,22 @@ Always say in the figure legend which one is shown and what n is.
 ## Graphs for grouped and XY data
 
 **Grouped graphs.** Grouped bars or grouped scatter plots compare data sets within each row; line plots show trends across rows (for example, over time). Brackets for comparisons within each row are drawn on the graph; comparisons between rows and cell-by-cell comparisons are listed in the results.
+
+**Grouped box plots and area plots.** **Grouped box plot** draws a box for each data set in each row (median, quartiles, and min-to-max or Tukey whiskers), with the points on top if you like. **Area plot** fills under each data set's means across the rows; choose Stacked to pile them up or Superimposed to overlap them.
+
+**Arrangement.** For grouped bars: **Interleaved** puts data sets side by side within each row (the only arrangement that draws comparison brackets); **Separated** gives each data set its own block of bars; **Stacked** piles the data sets in each row, each segment with its upward error bar; **Superimposed** overlaps them at one position, the shorter bar in front.
+
+**Orientation.** **Horizontal** turns column and grouped graphs on their side: group names run down the Y axis and values along X. Long group names often read better this way.
+
+**Right Y axis.** To compare data on different scales, such as force and temperature, check the data sets to draw against a second axis under **Right Y axis**, and give it a title. Use it sparingly: two Y axes invite readers to compare heights that are not on the same scale.
+
+**Volcano plots.** For proteomics and other omics data with many rows. In a Grouped table, put one protein (or gene, or site) per row with its name in the first column, and the replicates of two conditions in two data sets; the second data set is compared with the first. Each row gets a t test and a log2 fold change. Check **Values are already log2** when the intensities are log-transformed, so the fold change becomes the difference of means. In an XY table, enter fold changes as X and P values as Y, and turn on **Row titles** to name the points. With thousands of rows, hundreds of P values fall below 0.05 by chance alone, so consider **Use adjusted P (Benjamini-Hochberg FDR)**, which keeps the expected share of false discoveries below the cutoff. Points pass only if they clear both the fold change and the P cutoff. The **Volcano example** buttons load simulated data to try.
+
+**Circle heat maps.** Set **Cells drawn as** to Circles to show two values at once: circle area shows each cell's mean, and color shows the value chosen under **Circle color shows** (the mean again, SD, SEM, n, coefficient of variation, or the means of another grouped table with the same row and data set names).
+
+**3D graphs.** In a 3D table, choose 3D scatter, line, surface, wireframe, or bars. **Color by** uses Z, the fourth column, or a single color. Turn the view with **Elevation** and **Rotation**. 3D graphs are hard to read exactly, because perspective distorts heights; for publication, check that a 2D graph (a heat map or circle heat map, for example) would not show the same thing more clearly. Grouped tables can draw **3D bars** too.
+
+**Custom color schemes.** **Edit colors...** under Style and size makes a named scheme of up to 12 colors, used in order by the data sets. The colorblind check scores the most similar pair; aim for 10 or more. Schemes also appear as heat map and 3D color scales.
 
 **XY graphs.** Points with error bars or error bands show the mean of the replicates at each X. Turn on **Log scale X axis** for concentrations that span several orders of magnitude. Choose a model under **Model** to draw a curve through the data (see "Curve fitting").
 

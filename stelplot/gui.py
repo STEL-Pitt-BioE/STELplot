@@ -28,6 +28,8 @@ from . import prism_import
 from .clipboard import parse_clipboard
 from . import stats_engine as se
 from . import branding, help_docs, interpret, layout, outliers, transforms, workflow
+from . import plot3d as p3
+from . import volcano
 from . import lab_style as ls
 from .color_check import worst_pair
 from .lab_style import PALETTES, STAR_LEGEND, format_p
@@ -100,7 +102,8 @@ def apply_theme(app, dark=False):
     return assets
 
 
-KIND_BADGES = {"column": ("C", "#1f6feb"), "grouped": ("G", "#13ADA6"), "xy": ("XY", "#AE9122")}
+KIND_BADGES = {"column": ("C", "#1f6feb"), "grouped": ("G", "#13ADA6"), "xy": ("XY", "#AE9122"),
+               "xyz": ("3D", "#773E55")}
 _BADGE_CACHE = {}
 
 
@@ -1022,12 +1025,14 @@ class SeriesPanel(QtWidgets.QWidget):
     series_word = "Series"
     first_is_text = False
     hint_text = ""
+    allow_titles = False    # XY tables can add a Row title column at the right
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.x_name = self.first_default
         self.series_names = [f"{self.series_word} A", f"{self.series_word} B"]
         self.reps = 3
+        self.row_titles = False
         self.grid = DataGrid(DEFAULT_ROWS, self._headers(), grow_columns=False, header_paste=False,
                              text_columns={0} if self.first_is_text else (), excludable_from=1)
         self.grid.dataEdited.connect(self.changed)
@@ -1049,8 +1054,17 @@ class SeriesPanel(QtWidgets.QWidget):
         rb.addWidget(QtWidgets.QLabel("Replicates"))
         rb.addWidget(self.reps_spin)
         bar.addWidget(reps_box)
+        if self.allow_titles:
+            self.titles_check = QtWidgets.QCheckBox("Row titles")
+            self.titles_check.setToolTip("Adds a text column at the right that names each row, for "
+                                         "example the protein or gene on a volcano plot.")
+            self.titles_check.toggled.connect(self._titles_toggled)
+            bar.addWidget(self.titles_check)
         bar.addWidget(_button("Add 100 rows", self.add_rows))
         bar.addWidget(_button("Example data", self.load_example))
+        if hasattr(self, "load_volcano_example"):
+            bar.addWidget(_button("Volcano example", self.load_volcano_example,
+                                  "Simulated proteomics data for a volcano plot"))
         bar.addWidget(_button("Clear", self.clear))
 
         lay = QtWidgets.QVBoxLayout(self)
@@ -1065,19 +1079,58 @@ class SeriesPanel(QtWidgets.QWidget):
         headers = [self.x_name]
         for name in names:
             headers += [name] if reps == 1 else [f"{name} ({k + 1})" for k in range(reps)]
+        if self.row_titles:
+            headers.append("Row title")
         return headers
 
-    def _rebuild(self, new_names, new_reps, source_index):
+    def title_column(self):
+        """Grid column of the row titles, or None."""
+        return 1 + len(self.series_names) * self.reps if self.row_titles else None
+
+    def _sync_text_columns(self):
+        cols = {0} if self.first_is_text else set()
+        if self.row_titles:
+            cols.add(self.title_column())
+        self.grid.text_columns = cols
+
+    def _titles_toggled(self, on):
+        if on == self.row_titles:
+            return
+        if not on and any(t.strip() for t in self.row_title_list()):
+            answer = QtWidgets.QMessageBox.question(self, "Remove row titles",
+                                                    "Remove the row titles column and its text?")
+            if answer != QtWidgets.QMessageBox.Yes:
+                self.titles_check.blockSignals(True)
+                self.titles_check.setChecked(True)
+                self.titles_check.blockSignals(False)
+                return
+        old_titles = self.row_title_list()
+        self.row_titles = on
+        self._rebuild(self.series_names, self.reps, list(range(len(self.series_names))),
+                      titles=old_titles if on else None)
+
+    def row_title_list(self):
+        c = self.title_column()
+        if c is None:
+            return []
+        return [self.grid.cell_text(r, c).strip() for r in range(self.grid.rowCount())]
+
+    def _rebuild(self, new_names, new_reps, source_index, titles=None):
         """Rebuild columns. source_index[s] is the old series index for new series s, or None."""
         old = self.grid.to_matrix()
         old_excluded = {tuple(rc) for rc in self.grid.excluded_cells()}
         old_reps = self.reps
+        old_title_col = (1 + len(self.series_names) * old_reps) if self.row_titles else None
+        if titles is None and old_title_col is not None:
+            titles = [row[old_title_col] if old_title_col < len(row) else "" for row in old]
         self.series_names, self.reps = list(new_names), new_reps
         headers = self._headers()
         new_matrix, new_excluded = [], []
-        for row in old:
+        for r_i, row in enumerate(old):
             new_row = [""] * len(headers)
             new_row[0] = row[0] if row else ""
+            if self.row_titles and titles and r_i < len(titles):
+                new_row[-1] = titles[r_i]
             for s_new, src in enumerate(source_index):
                 if src is None:
                     continue
@@ -1090,6 +1143,7 @@ class SeriesPanel(QtWidgets.QWidget):
             new_matrix.append(new_row)
         self.grid.setColumnCount(len(headers))
         self.grid.setHorizontalHeaderLabels(headers)
+        self._sync_text_columns()
         self.grid.load_matrix(new_matrix, excluded=new_excluded)
         self.changed.emit()
 
@@ -1121,6 +1175,7 @@ class SeriesPanel(QtWidgets.QWidget):
             return
         c = self.grid.currentColumn()
         s_i = (c - 1) // self.reps if c >= 1 else len(self.series_names) - 1
+        s_i = min(s_i, len(self.series_names) - 1)   # the row titles column picks the last one
         answer = QtWidgets.QMessageBox.question(
             self, f"Remove {self.series_word.lower()}",
             f"Remove \"{self.series_names[s_i]}\" and its data?")
@@ -1131,6 +1186,8 @@ class SeriesPanel(QtWidgets.QWidget):
 
     def rename(self, c):
         if self.grid.locked:
+            return
+        if c == self.title_column():
             return
         if c == 0:
             current, title = self.x_name, "Rename first column"
@@ -1156,9 +1213,15 @@ class SeriesPanel(QtWidgets.QWidget):
             self.grid.load_matrix([])
             self.changed.emit()
 
-    def _load(self, first_name, names, reps, rows):
+    def _load(self, first_name, names, reps, rows, titles=False):
         self.x_name, self.series_names, self.reps = first_name, list(names), reps
         self._set_reps_quietly(reps)
+        if self.allow_titles:
+            self.row_titles = titles
+            self.titles_check.blockSignals(True)
+            self.titles_check.setChecked(titles)
+            self.titles_check.blockSignals(False)
+        self._sync_text_columns()
         self.grid.setColumnCount(len(self._headers()))
         self.grid.setHorizontalHeaderLabels(self._headers())
         self.grid.load_matrix([[str(v) for v in row] for row in rows])
@@ -1180,15 +1243,24 @@ class SeriesPanel(QtWidgets.QWidget):
         return block
 
     def state(self):
-        return {"x_name": self.x_name, "series_names": self.series_names,
-                "reps": self.reps, "cells": self.grid.to_matrix(),
-                "excluded": self.grid.excluded_cells()}
+        st = {"x_name": self.x_name, "series_names": self.series_names,
+              "reps": self.reps, "cells": self.grid.to_matrix(),
+              "excluded": self.grid.excluded_cells()}
+        if self.row_titles:
+            st["row_titles"] = True
+        return st
 
     def load_state(self, st):
         self.x_name = st.get("x_name", self.first_default)
         self.series_names = list(st.get("series_names") or [f"{self.series_word} A"])
         self.reps = int(st.get("reps", 1))
         self._set_reps_quietly(self.reps)
+        if self.allow_titles:
+            self.row_titles = bool(st.get("row_titles", False))
+            self.titles_check.blockSignals(True)
+            self.titles_check.setChecked(self.row_titles)
+            self.titles_check.blockSignals(False)
+        self._sync_text_columns()
         self.grid.setColumnCount(len(self._headers()))
         self.grid.setHorizontalHeaderLabels(self._headers())
         self.grid.load_matrix(st.get("cells", []), excluded=st.get("excluded"))
@@ -1197,9 +1269,20 @@ class SeriesPanel(QtWidgets.QWidget):
 class XYPanel(SeriesPanel):
     first_default = "X"
     series_word = "Series"
+    allow_titles = True
     hint_text = ("The first column is X. Each series has one column per replicate. "
                  "Double-click a column title to rename its series. Leave cells blank "
-                 "for missing replicates.")
+                 "for missing replicates. Row titles (optional) name the points on a volcano plot.")
+
+    def load_volcano_example(self):
+        """Simulated proteomics results: log2 fold change, P value, and protein names."""
+        rng = np.random.default_rng(7)
+        n = 600
+        fc = rng.normal(0, 0.8, n)
+        fc[:40] += rng.choice([-2.2, 2.2], 40)
+        p = np.clip(10 ** -(np.abs(fc) * rng.uniform(0.6, 2.4, n)), 1e-12, 1)
+        rows = [[f"{fc[i]:.4f}", f"{p[i]:.4g}", f"PROT{i + 1}"] for i in range(n)]
+        self._load("log2 fold change", ["P value"], 1, rows, titles=True)
 
     def load_example(self):
         rows = [[0.01, 2, 4, 1, 1, 0, 2], [0.1, 9, 12, 8, 3, 2, 4], [1, 48, 52, 45, 9, 12, 8],
@@ -1231,6 +1314,19 @@ class GroupedPanel(SeriesPanel):
                 ["Day 21", 12.3, 13.4, 11.6, 12.7, 15.8, 17.0, 14.6, 16.1]]
         self._load("Time point", ["Control", "Treated"], 4, rows)
 
+    def load_volcano_example(self):
+        """Simulated proteomics intensities: 500 proteins, wild type and knockout, 4 replicates."""
+        rng = np.random.default_rng(11)
+        n, reps = 500, 4
+        base = rng.normal(22, 2, (n, 1))
+        wt = base + rng.normal(0, 0.45, (n, reps))
+        shift = np.zeros((n, 1))
+        shift[:25], shift[25:50] = 1.8, -1.6
+        ko = base + shift + rng.normal(0, 0.45, (n, reps))
+        rows = [[f"PROT{i + 1}"] + [f"{2 ** v:.5g}" for v in wt[i]] + [f"{2 ** v:.5g}" for v in ko[i]]
+                for i in range(n)]
+        self._load("Protein", ["WT", "KO"], reps, rows)
+
     def get_grouped(self, keys=None):
         labels = []
         for r in range(self.grid.rowCount()):
@@ -1241,6 +1337,88 @@ class GroupedPanel(SeriesPanel):
             return labels, list(self.series_names), block
         keys = [k for k in keys if k < len(self.series_names)]
         return labels, [self.series_names[k] for k in keys], block[:, keys, :]
+
+
+class XYZPanel(QtWidgets.QWidget):
+    """3D table: one row per point, with X, Y, Z, and an optional color value."""
+
+    changed = QtCore.pyqtSignal()
+    HEADERS = ["X", "Y", "Z", "Color (optional)"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.grid = DataGrid(DEFAULT_ROWS, self.HEADERS, grow_columns=False, header_paste=True)
+        self.grid.dataEdited.connect(self.changed)
+        self.grid.horizontalHeader().sectionDoubleClicked.connect(self.rename)
+        bar = FlowLayout()
+        bar.addWidget(_button("Add 100 rows", self.add_rows))
+        bar.addWidget(_button("Example surface", self.load_example,
+                              "A grid of X and Y values with a smooth Z, colored by a 4th value"))
+        bar.addWidget(_button("Example scatter", self.load_scatter_example))
+        bar.addWidget(_button("Clear", self.clear))
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.addLayout(bar)
+        lay.addWidget(self.grid, 1)
+        lay.addWidget(_hint("Each row is one point: X, Y, and Z, plus an optional fourth value that "
+                            "sets its color. For a smooth surface or wireframe, give Z for every "
+                            "combination of X and Y. Double-click a column title to rename it."))
+
+    def rename(self, c):
+        if self.grid.locked:
+            return
+        text, ok = QtWidgets.QInputDialog.getText(self, "Rename column", "Column name:",
+                                                  QtWidgets.QLineEdit.Normal, self.grid.header_text(c))
+        if ok and text.strip():
+            self.grid.set_header_text(c, text.strip())
+            self.changed.emit()
+
+    def add_rows(self):
+        self.grid.setRowCount(self.grid.rowCount() + 100)
+
+    def clear(self):
+        answer = QtWidgets.QMessageBox.question(self, "Clear data", "Clear all values in this table?")
+        if answer == QtWidgets.QMessageBox.Yes:
+            self.grid.load_matrix([])
+            self.changed.emit()
+
+    def _load(self, rows, headers):
+        self.grid.setHorizontalHeaderLabels(headers)
+        self.grid.load_matrix([[format(v, ".5g") for v in row] for row in rows])
+        self.changed.emit()
+
+    def load_example(self):
+        xs = np.linspace(0, 10, 11)
+        ys = np.linspace(0, 40, 9)
+        rows = [[x, y, 20 * np.exp(-((x - 5) ** 2) / 8 - ((y - 20) ** 2) / 200), 0.5 * x + 0.05 * y]
+                for y in ys for x in xs]
+        self._load(rows, ["Stiffness (kPa)", "Time (h)", "Expression", "Viability (%)"])
+
+    def load_scatter_example(self):
+        rng = np.random.default_rng(3)
+        x = rng.normal(0, 1, 150)
+        y = 0.6 * x + rng.normal(0, 0.8, 150)
+        z = 0.4 * x - 0.5 * y + rng.normal(0, 0.5, 150)
+        self._load(np.column_stack([x, y, z, x + y + z]), ["PC1", "PC2", "PC3", "Score"])
+
+    def headers(self):
+        return [self.grid.header_text(c) for c in range(4)]
+
+    def get_xyz(self):
+        return tuple(self.grid.column_values(c) for c in range(4))
+
+    def series_keys(self):
+        return []
+
+    def state(self):
+        return {"headers": self.headers(), "cells": self.grid.to_matrix(),
+                "excluded": self.grid.excluded_cells()}
+
+    def load_state(self, st):
+        headers = list(st.get("headers") or self.HEADERS)[:4]
+        headers += self.HEADERS[len(headers):]
+        self.grid.setHorizontalHeaderLabels(headers)
+        self.grid.load_matrix(st.get("cells", []), excluded=st.get("excluded"))
 
 
 # ---------------------------------------------------------------------------
@@ -1406,12 +1584,84 @@ class SeriesPicker(QtWidgets.QWidget):
 # Option forms
 # ---------------------------------------------------------------------------
 
+class ColorButton(QtWidgets.QPushButton):
+    """Shows a color; click to choose another."""
+    colorChanged = QtCore.pyqtSignal()
+
+    def __init__(self, color="#000000", parent=None):
+        super().__init__(parent)
+        self.setAccessibleName("Choose color")
+        self.setFixedHeight(22)
+        self.clicked.connect(self._choose)
+        self.set_value(color)
+
+    def value(self):
+        return self._color
+
+    def set_value(self, color):
+        self._color = QtGui.QColor(str(color)).name() if QtGui.QColor(str(color)).isValid() else "#000000"
+        self.setText(self._color.upper())
+        light = QtGui.QColor(self._color).lightnessF() > 0.55
+        self.setStyleSheet(f"background-color: {self._color}; color: {'#000000' if light else '#ffffff'}; "
+                           "border: 1px solid #888888; border-radius: 3px;")
+
+    def _choose(self):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self._color), self, "Choose a color")
+        if c.isValid() and c.name() != self._color:
+            self.set_value(c.name())
+            self.colorChanged.emit()
+
+
+class CheckList(QtWidgets.QListWidget):
+    """A short list of names with check boxes; value() is the checked names in order."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMaximumHeight(84)
+        self._checked = []
+        self.itemChanged.connect(self._item_changed)   # runs before the form's own handler
+
+    def value(self):
+        return list(self._checked)
+
+    def set_value(self, names):
+        self._checked = [str(n) for n in (names or [])]
+        self._sync_checks()
+
+    def set_items(self, names):
+        names = list(names)
+        if [self.item(i).text() for i in range(self.count())] == names:
+            return
+        self.blockSignals(True)
+        self.clear()
+        for name in names:
+            item = QtWidgets.QListWidgetItem(name)
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            self.addItem(item)
+        self.blockSignals(False)
+        self._sync_checks()
+
+    def _sync_checks(self):
+        self.blockSignals(True)
+        for i in range(self.count()):
+            item = self.item(i)
+            item.setCheckState(Qt.Checked if item.text() in self._checked else Qt.Unchecked)
+        self.blockSignals(False)
+
+    def _item_changed(self, _item):
+        shown = {self.item(i).text() for i in range(self.count())}
+        self._checked = ([self.item(i).text() for i in range(self.count())
+                          if self.item(i).checkState() == Qt.Checked]
+                         + [n for n in self._checked if n not in shown])   # keep hidden choices
+
+
 class OptionsForm(QtWidgets.QWidget):
     changed = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.controls = {}
+        self.sections = {}
         self._layout = QtWidgets.QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
 
@@ -1423,6 +1673,7 @@ class OptionsForm(QtWidgets.QWidget):
         # When the panel is narrow, a long label moves above its field instead of widening the panel
         form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self._layout.addWidget(box)
+        self.sections[title] = box
         return form
 
     def _emit(self, *_):
@@ -1459,6 +1710,22 @@ class OptionsForm(QtWidgets.QWidget):
         form.addRow(label, w)
         self.controls[key] = w
 
+    def color(self, form, key, label, value):
+        """A swatch button that opens a color chooser."""
+        w = ColorButton(value)
+        w.colorChanged.connect(self._emit)
+        form.addRow(label, w)
+        self.controls[key] = w
+
+    def checklist(self, form, key, label, hint=""):
+        """Checkable names (for example, the data sets drawn on the right Y axis)."""
+        w = CheckList()
+        w.itemChanged.connect(self._emit)
+        if hint:
+            w.setToolTip(hint)
+        form.addRow(label, w)
+        self.controls[key] = w
+
     def text(self, form, key, label, value="", placeholder=""):
         w = QtWidgets.QLineEdit(value)
         if placeholder:
@@ -1469,6 +1736,8 @@ class OptionsForm(QtWidgets.QWidget):
 
     def get(self, key):
         w = self.controls[key]
+        if isinstance(w, (ColorButton, CheckList)):
+            return w.value()
         if isinstance(w, QtWidgets.QComboBox):
             return w.currentText()
         if isinstance(w, QtWidgets.QCheckBox):
@@ -1481,8 +1750,12 @@ class OptionsForm(QtWidgets.QWidget):
         w = self.controls[key]
         w.blockSignals(True)
         try:
-            if isinstance(w, QtWidgets.QComboBox):
+            if isinstance(w, (ColorButton, CheckList)):
+                w.set_value(value)
+            elif isinstance(w, QtWidgets.QComboBox):
                 from .lab_style import PALETTE_ALIASES
+                if str(value).startswith("Table: ") and w.findText(str(value)) < 0:
+                    w.addItem(str(value))   # another table, listed once the project has loaded
                 idx = w.findText(str(value))
                 if idx < 0:
                     idx = w.findText(PALETTE_ALIASES.get(str(value), ""))
@@ -1500,6 +1773,9 @@ class OptionsForm(QtWidgets.QWidget):
     def set_items(self, key, items):
         """Replace a menu's choices, keeping the current choice when it still exists."""
         w = self.controls[key]
+        if isinstance(w, CheckList):
+            w.set_items(items)
+            return
         current = w.currentText()
         w.blockSignals(True)
         try:
@@ -1543,6 +1819,9 @@ def _style_group(form_owner, d, include_frame=True):
     form_owner.number(f, "font_size", "Numbering size", 4, 24, 0.5, d.font_size, 1, " pt")
     form_owner.check(f, "bold", "Bold text", d.bold)
     form_owner.combo(f, "palette", "Colors", list(PALETTES), d.palette)
+    f.addRow("", _button("Edit colors...", form_owner.edit_colors,
+                         "Make your own color scheme: pick each data set's color, save it under a "
+                         "name, and use it on any graph"))
     form_owner.text(f, "ref_y", "Reference line at Y", "", "e.g. 1 or 0, 100")
     f.addRow(_hint("Axis titles and legends are 1 pt larger than the numbering. "
                    "Lab template matches the lab's Prism exports."))
@@ -1588,6 +1867,90 @@ class _StyledForm(OptionsForm):
         if self.on_edit_style is not None:
             self.on_edit_style(self)
 
+    on_edit_colors = None   # set by the main window
+
+    def edit_colors(self, *_):
+        if self.on_edit_colors is not None:
+            self.on_edit_colors(self)
+
+    def show_section(self, title, on):
+        box = self.sections.get(title)
+        if box is not None and box.isVisibleTo(self) != on:
+            box.setVisible(on)
+
+
+def _volcano_group(form_owner, grouped):
+    """Settings shared by grouped and XY volcano plots."""
+    d = pl.VolcanoOptions()
+    f = form_owner.group("Volcano plot")
+    form_owner.number(f, "v_fc", "Fold change cutoff (|log2|)", 0, 20, 0.1, d.fc_cutoff, 2)
+    form_owner.number(f, "v_p", "P value cutoff", 0.000001, 1, 0.01, d.p_cutoff, 6)
+    form_owner.check(f, "v_fdr", "Use adjusted P (Benjamini-Hochberg FDR)", d.use_fdr)
+    form_owner.controls["v_fdr"].setToolTip("Thresholds and plots the false discovery rate adjusted "
+                                            "P values (Benjamini and Hochberg, 1995) instead of P.")
+    if grouped:
+        form_owner.combo(f, "v_test", "Test on each row", volcano.TESTS, d.test)
+        form_owner.check(f, "v_log", "Values are already log2", d.already_log)
+        f.addRow(_hint("Each row is one protein, gene, or site. The second data set on the graph is "
+                       "compared with the first (fold change = second / first)."))
+    else:
+        form_owner.combo(f, "v_pinput", "Y values are", volcano.P_INPUTS, d.p_input)
+        f.addRow(_hint("X is the log2 fold change and the first Y column the P value. Turn on Row "
+                       "titles above the table to name the points."))
+    form_owner.number(f, "v_top", "Label the most significant", 0, 500, 1, d.label_top, 0, " rows")
+    form_owner.text(f, "v_names", "Also label", "", "names, separated by commas")
+    form_owner.color(f, "v_up", "Up color", d.up_color)
+    form_owner.color(f, "v_down", "Down color", d.down_color)
+    form_owner.color(f, "v_ns", "Not significant color", d.ns_color)
+    form_owner.check(f, "v_counts", "Show counts in the legend", d.show_counts)
+
+
+def _volcano_options(form, grouped):
+    g = form.get
+    return pl.VolcanoOptions(
+        fc_cutoff=g("v_fc"), p_cutoff=g("v_p"), use_fdr=g("v_fdr"),
+        test=g("v_test") if grouped else volcano.TESTS[0],
+        already_log=g("v_log") if grouped else False,
+        p_input=volcano.P_INPUTS[0] if grouped else g("v_pinput"),
+        label_top=int(round(g("v_top"))), label_names=g("v_names"), up_color=g("v_up"),
+        down_color=g("v_down"), ns_color=g("v_ns"), show_counts=g("v_counts"))
+
+
+def _right_axis_group(form_owner, plural):
+    f = form_owner.group("Right Y axis")
+    form_owner.checklist(f, "right_series", f"{plural.capitalize()} on the right axis",
+                         f"Checked {plural} are drawn against a second Y axis on the right.")
+    form_owner.text(f, "right_label", "Right Y-axis title", "", "Names of the checked " + plural)
+    form_owner.text(f, "right_min", "Right Y minimum", "", "Auto")
+    form_owner.text(f, "right_max", "Right Y maximum", "", "Auto")
+    f.addRow(_hint("For data on different scales, such as a measurement and a temperature."))
+
+
+def _view3d_group(form_owner, color_choices, default_color_by, z_label=True):
+    d = p3.View3DOptions()
+    f = form_owner.group("3D view")
+    form_owner.combo(f, "color_by", "Color by", color_choices, default_color_by)
+    form_owner.combo(f, "cmap3d", "Color scale", pl.heat_map_names(), d.cmap)
+    form_owner.text(f, "color_label", "Color bar title", "", "Auto")
+    form_owner.check(f, "colorbar", "Show color bar", d.colorbar)
+    form_owner.number(f, "elev", "Elevation", -90, 90, 5, d.elev, 0, "\u00b0")
+    form_owner.number(f, "azim", "Rotation", -180, 180, 5, d.azim, 0, "\u00b0")
+    form_owner.combo(f, "projection", "Projection", p3.PROJECTIONS, d.projection)
+    form_owner.number(f, "bar_width", "Bar width", 0.1, 1.0, 0.05, d.bar_width, 2)
+    if z_label:
+        form_owner.text(f, "z_label", "Z-axis title", d.z_label)
+    form_owner.text(f, "z_min", "Z minimum", "", "Auto")
+    form_owner.text(f, "z_max", "Z maximum", "", "Auto")
+
+
+def _view3d_options(form, z_label=None):
+    g = form.get
+    return p3.View3DOptions(
+        elev=g("elev"), azim=g("azim"), projection=g("projection"), color_by=g("color_by"),
+        cmap=g("cmap3d"), color_label=g("color_label"),
+        z_label=z_label if z_label is not None else g("z_label"), z_min=form.optional("z_min"),
+        z_max=form.optional("z_max"), bar_width=g("bar_width"), colorbar=g("colorbar"))
+
 
 class ColumnOptions(_StyledForm):
     def __init__(self, parent=None):
@@ -1606,6 +1969,7 @@ class ColumnOptions(_StyledForm):
         self.combo(f, "bar_style", "Bars", pl.BAR_STYLES, d.bar_style)
         self.combo(f, "whiskers", "Whiskers", pl.WHISKER_TYPES, d.whiskers)
         self.combo(f, "error_style", "Error bar lines", pl.ERROR_STYLES, d.error_style)
+        self.combo(f, "orientation", "Orientation", pl.ORIENTATIONS, d.orientation)
         self.text(f, "hist_bin_width", "Bin width", "", "Auto")
         self.text(f, "hist_bin_start", "First bin starts at", "", "Auto")
         self.combo(f, "hist_values", "Histogram shows", pl.HIST_VALUES, d.hist_values)
@@ -1645,6 +2009,7 @@ class ColumnOptions(_StyledForm):
         self.controls["point_layout"].setEnabled(pt != "Before-after (matched rows)")
         self.controls["error"].setEnabled(pt in ("Scatter dot plot", "Bar with points"))
         hist = pt == pl.HISTOGRAM
+        self.controls["orientation"].setEnabled(not hist)
         for key in ("hist_bin_width", "hist_bin_start", "hist_values", "hist_style", "ref_x"):
             self.controls[key].setEnabled(hist)
         if hist:
@@ -1676,7 +2041,7 @@ class ColumnOptions(_StyledForm):
             hist_bin_width=self.optional("hist_bin_width"), hist_bin_start=self.optional("hist_bin_start"),
             hist_values=g("hist_values"), hist_style=g("hist_style"),
             annotation=g("annotation"), show_ns=g("show_ns"), rotate_labels=g("rotate_labels"),
-            frame=g("frame"), ref_y=g("ref_y"))
+            frame=g("frame"), ref_y=g("ref_y"), orientation=g("orientation"))
 
 
 class GroupedOptions(_StyledForm):
@@ -1686,19 +2051,34 @@ class GroupedOptions(_StyledForm):
         self.add_picker("data set", "data sets", "ANOVA")
         f = self.group("Graph")
         self.combo(f, "plot_type", "Type", pl.GROUPED_PLOT_TYPES, d.plot_type)
+        self.combo(f, "arrangement", "Arrangement", pl.ARRANGEMENTS, d.arrangement)
+        self.controls["arrangement"].setToolTip(
+            "Interleaved: data sets side by side in each row. Separated: one block of bars per data "
+            "set. Stacked: data sets piled on each other. Superimposed: data sets overlap, the "
+            "shorter in front.")
+        self.combo(f, "orientation", "Orientation", pl.ORIENTATIONS, d.orientation)
         self.combo(f, "error", "Error bars", se.ERROR_TYPES, d.error)
         self.check(f, "show_points", "Show individual points", d.show_points)
         self.number(f, "point_size", "Point size", 1, 15, 0.1, d.point_size, 1, " pt")
         self.combo(f, "marker", "Marker shape", pl.MARKER_CHOICES, d.marker)
         self.combo(f, "marker_fill", "Markers", pl.MARKER_FILLS, d.marker_fill)
         self.combo(f, "bar_style", "Bars", pl.BAR_STYLES, d.bar_style)
+        self.combo(f, "whiskers", "Whiskers", pl.WHISKER_TYPES, d.whiskers)
         self.combo(f, "legend", "Legend", pl.LEGEND_POSITIONS, d.legend)
         self.combo(f, "error_style", "Error bar lines", pl.ERROR_STYLES, d.error_style)
-        self.combo(f, "heat_cmap", "Heat map colors", list(pl.HEAT_MAPS), d.heat_cmap)
+        self.combo(f, "heat_cmap", "Heat map colors", pl.heat_map_names(), d.heat_cmap)
         self.check(f, "heat_values", "Show values in cells", d.heat_values)
         self.controls["heat_cmap"].setToolTip("Viridis, Cividis, and Magma read correctly in grayscale and "
                                               "with color-vision deficiency. Y minimum and maximum set "
-                                              "the color range.")
+                                              "the color range. Your own color schemes are listed too.")
+        self.combo(f, "heat_shape", "Cells drawn as", pl.HEAT_SHAPES, d.heat_shape)
+        self.combo(f, "circle_color", "Circle color shows", pl.CIRCLE_COLORS, d.circle_color)
+        self.controls["circle_color"].setToolTip(
+            "Circle size shows each cell's mean. Color can show the same mean, the cell's SD, SEM, "
+            "number of values, or coefficient of variation, or the cell means of another grouped "
+            "table (matched by row and data set names).")
+        self.text(f, "circle_color_label", "Color bar title", "", "Auto")
+        self._plot_type = d.plot_type
 
         f = self.group("Statistics")
         self.combo(f, "analysis", "Analysis", anova.ANALYSES, "Two-way ANOVA")
@@ -1722,6 +2102,9 @@ class GroupedOptions(_StyledForm):
         self.text(f, "x_label", "X-axis title", d.x_label)
         self.check(f, "rotate_labels", "Angle row names", d.rotate_labels)
 
+        _volcano_group(self, grouped=True)
+        _view3d_group(self, p3.GROUPED_COLOR_BY, "Data set", z_label=False)
+        _right_axis_group(self, "data sets")
         _style_group(self, d)
         self._layout.addStretch(1)
         self.changed.connect(self.update_enabled)
@@ -1729,9 +2112,26 @@ class GroupedOptions(_StyledForm):
 
     def update_enabled(self):
         pt = self.get("plot_type")
+        if pt != self._plot_type:
+            if pt == pl.VOLCANO and self.get("legend") == "Inside upper left":
+                self.set("legend", "Above plot")   # an inside legend would cover the points
+            self._plot_type = pt
         line = pt.startswith("Line")
+        special = pt in (pl.HEAT_MAP, pl.VOLCANO, pl.BARS_3D)
         self.controls["bar_style"].setEnabled(pt == "Grouped bars")
-        self.controls["show_points"].setEnabled(pt != "Grouped scatter dot plot")
+        self.controls["arrangement"].setEnabled(pt in ("Grouped bars", pl.AREA))
+        self.controls["orientation"].setEnabled(not special)
+        self.controls["whiskers"].setEnabled(pt == pl.GROUPED_BOX)
+        self.controls["show_points"].setEnabled(
+            pt not in ("Grouped scatter dot plot", pl.AREA) and not special
+            and not (pt == "Grouped bars" and self.get("arrangement") == "Stacked"))
+        circles = pt == pl.HEAT_MAP and self.get("heat_shape") == "Circles"
+        self.controls["heat_shape"].setEnabled(pt == pl.HEAT_MAP)
+        self.controls["circle_color"].setEnabled(circles)
+        self.controls["circle_color_label"].setEnabled(circles)
+        self.show_section("Volcano plot", pt == pl.VOLCANO)
+        self.show_section("3D view", pt == pl.BARS_3D)
+        self.show_section("Right Y axis", pt in pl.RIGHT_AXIS_TYPES)
         on = self.get("analysis") != "None"
         design = self.get("design")
         for key in ("design", "comparisons", "correction"):
@@ -1743,11 +2143,15 @@ class GroupedOptions(_StyledForm):
         self.controls["heat_values"].setEnabled(heat)
         for key in ("error", "point_size", "marker", "marker_fill", "legend", "error_style", "log_y"):
             self.controls[key].setEnabled(not heat)
-        if heat:
-            for key in ("show_points", "bar_style", "annotation", "show_ns"):
+        if pt in (pl.VOLCANO, pl.BARS_3D):
+            for key in ("error", "marker", "marker_fill", "error_style", "log_y"):
                 self.controls[key].setEnabled(False)
-        self.controls["annotation"].setEnabled(on and not line)
-        self.controls["show_ns"].setEnabled(on and not line)
+            self.controls["point_size"].setEnabled(pt == pl.VOLCANO)
+            self.controls["legend"].setEnabled(pt == pl.VOLCANO)
+        self.controls["error"].setEnabled(pt not in (pl.GROUPED_BOX, pl.AREA) and not special)
+        brackets = (on and not line and pt not in (pl.AREA,) and not special)
+        self.controls["annotation"].setEnabled(brackets)
+        self.controls["show_ns"].setEnabled(brackets)
         self.design_hint.setText(anova.DESIGN_HELP.get(design, ""))
 
     def options(self):
@@ -1762,7 +2166,12 @@ class GroupedOptions(_StyledForm):
             show_points=g("show_points"), bar_style=g("bar_style"), error_style=g("error_style"),
             annotation=g("annotation"), show_ns=g("show_ns"), rotate_labels=g("rotate_labels"),
             legend=g("legend"), frame=g("frame"), ref_y=g("ref_y"), log_y=g("log_y"),
-            heat_cmap=g("heat_cmap"), heat_values=g("heat_values"))
+            heat_cmap=g("heat_cmap"), heat_values=g("heat_values"), heat_shape=g("heat_shape"),
+            circle_color=g("circle_color"), circle_color_label=g("circle_color_label"),
+            arrangement=g("arrangement"), orientation=g("orientation"), whiskers=g("whiskers"),
+            right_series=tuple(g("right_series")), right_label=g("right_label"),
+            right_min=self.optional("right_min"), right_max=self.optional("right_max"),
+            volcano=_volcano_options(self, grouped=True), view3d=_view3d_options(self, ""))
 
 
 class XYOptions(_StyledForm):
@@ -1771,6 +2180,7 @@ class XYOptions(_StyledForm):
         d = pl.XYPlotOptions()
         self.add_picker("data set", "data sets", "curve fits")
         f = self.group("Graph")
+        self.combo(f, "plot_type", "Type", pl.XY_PLOT_TYPES, d.plot_type)
         self.combo(f, "error", "Error", se.ERROR_TYPES, d.error)
         self.combo(f, "error_display", "Show error as", pl.XY_ERROR_DISPLAYS, d.error_display)
         self.number(f, "point_size", "Point size", 0.5, 15, 0.1, d.point_size, 1, " pt")
@@ -1789,11 +2199,30 @@ class XYOptions(_StyledForm):
         self.text(f, "x_label", "X-axis title", d.x_label)
         self.text(f, "y_label", "Y-axis title", d.y_label)
 
+        _volcano_group(self, grouped=False)
+        _right_axis_group(self, "data sets")
         f = _style_group(self, d)
         self.text(f, "x_min", "X minimum", "", "Auto")
         self.text(f, "x_max", "X maximum", "", "Auto")
         self.text(f, "ref_x", "Reference line at X", "", "e.g. 24")
         self._layout.addStretch(1)
+        self._plot_type = d.plot_type
+        self.changed.connect(self.update_enabled)
+        self.update_enabled()
+
+    def update_enabled(self):
+        pt = self.get("plot_type")
+        if pt != self._plot_type:
+            if pt == pl.VOLCANO and self.get("legend") == "Inside upper left":
+                self.set("legend", "Above plot")
+            self._plot_type = pt
+        volc = pt == pl.VOLCANO
+        for key in ("error", "error_display", "marker", "marker_fill", "error_style", "connect",
+                    "log_x", "log_y", "fit_model"):
+            self.controls[key].setEnabled(not volc)
+        self.show_section("Volcano plot", volc)
+        self.show_section("Curve fit", not volc)
+        self.show_section("Right Y axis", pt in pl.RIGHT_AXIS_TYPES)
 
     def options(self):
         g = self.get
@@ -1806,8 +2235,62 @@ class XYOptions(_StyledForm):
             bold=g("bold"), style=g("style"), palette=g("palette"), point_size=g("point_size"),
             marker=g("marker"), marker_fill=g("marker_fill"), log_x=g("log_x"),
             connect=g("connect"), error_style=g("error_style"),
-            legend=g("legend"), fit_model=g("fit_model"), frame=g("frame"),
-            ref_x=g("ref_x"), ref_y=g("ref_y"), log_y=g("log_y"))
+            legend=g("legend"), fit_model=g("fit_model") if g("plot_type") != pl.VOLCANO else "None",
+            frame=g("frame"), ref_x=g("ref_x"), ref_y=g("ref_y"), log_y=g("log_y"),
+            plot_type=g("plot_type"), right_series=tuple(g("right_series")),
+            right_label=g("right_label"), right_min=self.optional("right_min"),
+            right_max=self.optional("right_max"), volcano=_volcano_options(self, grouped=False))
+
+
+class XYZOptions(_StyledForm):
+    """Graph settings for 3D tables."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        d = p3.XYZPlotOptions()
+        f = self.group("Graph")
+        self.combo(f, "plot_type", "Type", p3.KINDS_3D, d.plot_type)
+        self.number(f, "point_size", "Point size", 0.5, 15, 0.1, d.point_size, 1, " pt")
+        self.check(f, "use_headers", "Use column titles as axis titles", True)
+        _view3d_group(self, p3.COLOR_BY, d.view3d.color_by)
+        f = self.group("Labels")
+        self.text(f, "title", "Title", d.title)
+        self.text(f, "x_label", "X-axis title", d.x_label)
+        self.text(f, "y_label", "Y-axis title", d.y_label)
+        f = _style_group(self, d, include_frame=False)
+        for key in ("y_min", "y_max", "log_y", "ref_y"):
+            self.controls[key].setEnabled(False)
+            self.controls[key].setToolTip("Not used by 3D graphs; set Z limits under 3D view.")
+        self.set("width_in", d.width_in)
+        self.set("height_in", d.height_in)
+        self._layout.addStretch(1)
+        self.changed.connect(self.update_enabled)
+        self.update_enabled()
+
+    def update_enabled(self):
+        pt = self.get("plot_type")
+        heads = self.get("use_headers")
+        for key in ("x_label", "y_label", "z_label"):
+            self.controls[key].setEnabled(not heads)
+        self.controls["bar_width"].setEnabled(pt == "3D bars")
+        self.controls["point_size"].setEnabled(pt in ("3D scatter", "3D line", "Wireframe"))
+        single = self.get("color_by") == p3.COLOR_BY[2]
+        for key in ("cmap3d", "color_label", "colorbar"):
+            self.controls[key].setEnabled(not single)
+
+    def options(self, headers=None):
+        g = self.get
+        heads = g("use_headers") and headers
+        v = _view3d_options(self, headers[2] if heads else None)
+        if heads and not g("color_label") and v.color_by == p3.COLOR_BY[1]:
+            v.color_label = headers[3]
+        return p3.XYZPlotOptions(
+            plot_type=g("plot_type"), title=g("title"),
+            x_label=headers[0] if heads else g("x_label"),
+            y_label=headers[1] if heads else g("y_label"),
+            width_in=g("width_in"), height_in=g("height_in"), font_size=g("font_size"),
+            bold=g("bold"), style=g("style"), palette=g("palette"), point_size=g("point_size"),
+            view3d=v)
 
 
 # ---------------------------------------------------------------------------
@@ -2074,15 +2557,112 @@ class StyleEditor(QtWidgets.QDialog):
 # Main window
 # ---------------------------------------------------------------------------
 
+class PaletteEditor(QtWidgets.QDialog):
+    """Make or change a color scheme: the colors data sets use, in order."""
+
+    def __init__(self, parent, name, colors):
+        super().__init__(parent)
+        self.setWindowTitle("Edit colors")
+        self.result = None
+        self.deleted = False
+        custom = name in ls.CUSTOM_PALETTES
+        n_max = ls.MAX_PALETTE_COLORS
+        colors = list(colors or ls.PALETTES[ls.DEFAULT_PALETTE])
+        self.colors = (colors + ["#999999"] * n_max)[:n_max]
+        outer = QtWidgets.QVBoxLayout(self)
+        top = QtWidgets.QFormLayout()
+        self.name_edit = QtWidgets.QLineEdit(name if custom else f"{name} (custom)")
+        self.name_edit.setAccessibleName("Color scheme name")
+        top.addRow("Color scheme name", self.name_edit)
+        self.n_colors = QtWidgets.QSpinBox()
+        self.n_colors.setRange(1, n_max)
+        self.n_colors.setValue(max(1, min(n_max, len(colors))))
+        self.n_colors.valueChanged.connect(lambda *_: self._update())
+        top.addRow("Number of colors", self.n_colors)
+        outer.addLayout(top)
+        grid = QtWidgets.QGridLayout()
+        self.buttons = []
+        for j in range(n_max):
+            b = QtWidgets.QPushButton()
+            b.setFixedSize(58, 28)
+            b.setAccessibleName(f"Color {j + 1}")
+            b.setToolTip(f"Color {j + 1}: click to choose")
+            b.clicked.connect(lambda _checked=False, j=j: self._pick(j))
+            grid.addWidget(QtWidgets.QLabel(str(j + 1)), (j // 6) * 2, j % 6, Qt.AlignHCenter)
+            grid.addWidget(b, (j // 6) * 2 + 1, j % 6)
+            self.buttons.append(b)
+        outer.addLayout(grid)
+        outer.addWidget(_hint("Data sets take the colors in order: the first data set gets color 1. "
+                              "Heat maps and 3D graphs can also use a scheme of two or more colors "
+                              "as a gradient. Schemes are kept on this computer and saved inside "
+                              "projects that use them."))
+        self.cvd_label = _hint("")
+        outer.addWidget(self.cvd_label)
+        box = QtWidgets.QDialogButtonBox()
+        save = box.addButton("Save", QtWidgets.QDialogButtonBox.AcceptRole)
+        save.clicked.connect(self._save)
+        if custom:
+            delete = box.addButton("Delete scheme", QtWidgets.QDialogButtonBox.DestructiveRole)
+            delete.clicked.connect(self._delete)
+        box.addButton(QtWidgets.QDialogButtonBox.Cancel).clicked.connect(self.reject)
+        outer.addWidget(box)
+        self._update()
+
+    def _pick(self, j):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.colors[j]), self, "Choose a color")
+        if c.isValid():
+            self.colors[j] = c.name().upper()
+            self._update()
+
+    def chosen(self):
+        return self.colors[:self.n_colors.value()]
+
+    def _update(self):
+        n = self.n_colors.value()
+        for j, b in enumerate(self.buttons):
+            used = j < n
+            b.setEnabled(used)
+            b.setText("" if used else "off")
+            b.setStyleSheet(f"background-color: {self.colors[j] if used else '#f2f2f2'}; "
+                            "border: 1px solid #888888; border-radius: 3px;")
+        if n < 2:
+            self.cvd_label.setText("Colorblind check needs at least two colors.")
+            return
+        d, kind, variant, c1, c2 = worst_pair(self.chosen())
+        rating = "good" if d >= 10 else ("fair" if d >= 5 else "hard to tell apart")
+        self.cvd_label.setText(
+            f"Colorblind check: the most similar pair differs by {d:.1f} ({rating}); {c1} vs {c2} "
+            f"under {kind}, {variant}. Guide: 10 or more good, 5 to 10 fair (Journal scores 9.9).")
+
+    def _save(self):
+        name = self.name_edit.text().strip()
+        if not name:
+            QtWidgets.QMessageBox.information(self, "Name needed", "Give the color scheme a name.")
+            return
+        if name in ls.BUILTIN_PALETTES or name in ls.STYLE_PRESETS:
+            QtWidgets.QMessageBox.information(self, "Built-in name",
+                                              f"'{name}' is built in. Save under a new name.")
+            return
+        self.result = (name, self.chosen())
+        self.accept()
+
+    def _delete(self):
+        self.deleted = True
+        self.accept()
+
+
 TABLE_KINDS = {
     "column": ("Column table", ColumnPanel, ColumnOptions),
     "grouped": ("Grouped table", GroupedPanel, GroupedOptions),
     "xy": ("XY table", XYPanel, XYOptions),
+    "xyz": ("3D table", XYZPanel, XYZOptions),
 }
 TABLE_HINTS = {
     "column": "Each column is one group.",
     "grouped": "Rows are one factor and data sets the other; replicates sit side by side.",
     "xy": "X values in the first column, Y replicates beside them.",
+    "xyz": "X, Y, and Z for each point, plus an optional color value: 3D scatter, line, surface, "
+           "wireframe, and bars.",
 }
 
 
@@ -2406,6 +2986,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Add a table to the project. `state` may hold "data" and "options"."""
         t = DataTable(kind, title or self._next_table_name())
         t.opts.on_edit_style = self.edit_style
+        t.opts.on_edit_colors = self.edit_colors
         if state:
             was = self._restoring
             self._restoring = True
@@ -2587,6 +3168,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def transform_dialog(self, *_):
         t = self.current_table()
+        if t.kind == "xyz":
+            QtWidgets.QMessageBox.information(self, "Transform data", "Transforms work on Column, "
+                                              "Grouped, and XY tables.")
+            return
         if not t.has_data():
             QtWidgets.QMessageBox.information(self, "Transform data", "This table has no data yet.")
             return
@@ -2829,6 +3414,14 @@ class MainWindow(QtWidgets.QMainWindow):
     # ----- layout sheets
     def figure_for_table(self, t):
         """Render a table's graph at export size without changing the window. None if empty."""
+        if t.kind == "xyz":
+            opts = t.opts.options(t.panel.headers())
+            x, y, z, c = t.panel.get_xyz()
+            if not np.isfinite(z).any():
+                return None
+            fig = Figure(figsize=(opts.width_in, opts.height_in))
+            p3.render_xyz(fig, x, y, z, c, opts)
+            return fig
         opts = t.opts.options()
         t.opts.picker.sync(t.panel.series_keys())
         keys = t.opts.picker.selected()
@@ -2849,15 +3442,34 @@ class MainWindow(QtWidgets.QMainWindow):
                                         comparisons=g.get("comparisons"), correction=g.get("correction"),
                                         gg=g.get("gg"), model=g.get("model"))
                       if g.get("analysis") != "None" else None)
-            pl.render_grouped(fig, labels, names, block, opts, result)
+            pl.render_grouped(fig, labels, names, block, opts, result, self._color_source(t))
         else:
             x, series = t.panel.get_xy(keys)
             if not series:
                 return None
             fits = ([se.fit_curve(name, x, y, opts.fit_model) for name, y in series]
                     if opts.fit_model != "None" else [])
-            pl.render_xy(fig, x, series, opts, fits)
+            pl.render_xy(fig, x, series, opts, fits, t.panel.row_title_list())
         return fig
+
+    def _color_source(self, t):
+        """For circle heat maps colored by another grouped table: (row labels, names, values)."""
+        choice = t.opts.get("circle_color")
+        if not choice.startswith("Table: "):
+            return None
+        title = choice[len("Table: "):]
+        other = next((o for o in self.tables if o.kind == "grouped" and o.title == title
+                      and o is not t), None)
+        return other.panel.get_grouped() if other is not None else None
+
+    def _sync_choices(self, t):
+        """Lists that depend on the table's data sets and on the other tables in the project."""
+        if "right_series" in t.opts.controls:
+            names = [n for _k, n in t.panel.series_keys()]
+            t.opts.set_items("right_series", names)
+        if t.kind == "grouped":
+            others = [f"Table: {o.title}" for o in self.tables if o.kind == "grouped" and o is not t]
+            t.opts.set_items("circle_color", pl.CIRCLE_COLORS + others)
 
     def export_layout(self, tables, path, ncols=2, gap_in=0.25, letters=True, letter_size=10.0):
         """Arrange the graphs of `tables` into one SVG, PNG, or TIFF file."""
@@ -3095,6 +3707,49 @@ class MainWindow(QtWidgets.QMainWindow):
         for form in self._forms():
             form.set_items("style", ls.style_names())
             form.set_items("palette", list(ls.PALETTES))
+            for key in ("heat_cmap", "cmap3d"):
+                if key in form.controls:
+                    form.set_items(key, pl.heat_map_names())
+
+    def edit_colors(self, form):
+        name = ls.PALETTE_ALIASES.get(form.get("palette"), form.get("palette"))
+        dlg = PaletteEditor(self, name, ls.PALETTES.get(name))
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        if dlg.deleted:
+            ls.remove_palette(name)
+            self._save_style_library()
+            self._refresh_style_lists()
+            for f in self._forms():
+                if f.get("palette") not in ls.PALETTES:
+                    f.set("palette", ls.DEFAULT_PALETTE)
+                    f.changed.emit()
+            self.statusBar().showMessage(f"Deleted color scheme '{name}'.", 5000)
+            return
+        new_name, colors = dlg.result
+        try:
+            ls.register_palette(new_name, colors)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.information(self, "Colors not saved", str(exc))
+            return
+        self._save_style_library()
+        self._refresh_style_lists()
+        form.set("palette", new_name)
+        form.changed.emit()
+        for f in self._forms():
+            if f is not form and new_name in (f.get("palette"), f.get("heat_cmap") if "heat_cmap" in
+                                              f.controls else None):
+                f.changed.emit()
+        self.statusBar().showMessage(f"Saved color scheme '{new_name}'. It is available for every "
+                                     "table.", 6000)
+
+    def _palettes_in_use(self):
+        names = set()
+        for form in self._forms():
+            for key in ("palette", "heat_cmap", "cmap3d"):
+                if key in form.controls:
+                    names.add(form.get(key))
+        return {n: list(ls.CUSTOM_PALETTES[n]) for n in names if n in ls.CUSTOM_PALETTES}
 
     def edit_style(self, form):
         name = form.get("style")
@@ -3342,8 +3997,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.layout_timer.start()
         try:
             t = self.current_table()
+            if t.kind != "xyz":
+                self._sync_choices(t)
             {"column": self._refresh_column, "grouped": self._refresh_grouped,
-             "xy": self._refresh_xy}[t.kind](t)
+             "xy": self._refresh_xy, "xyz": self._refresh_xyz}[t.kind](t)
         except Exception:  # keep the app running and show the details
             self.results.setPlainText("The graph could not be drawn.\n\n" + traceback.format_exc())
             self.statusBar().showMessage("Drawing failed. Details are in the results panel.", 8000)
@@ -3380,7 +4037,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_canvas(*self.fig.get_size_inches())
         self.canvas.draw_idle()
         self.last = {"kind": "column", "groups": groups, "opts": opts, "result": result,
-                     "title": t.title}
+                     "title": t.title,
+                     "draw": lambda fig: pl.render_column(fig, groups, opts, result)}
         report = se.column_report(result, opts.error, t.title) + self._excluded_note(t)
         freq = getattr(self.fig, "stel_frequency", None) if opts.plot_type == pl.HISTOGRAM else None
         if freq:
@@ -3401,14 +4059,23 @@ class MainWindow(QtWidgets.QMainWindow):
                                        comparisons=g.get("comparisons"),
                                        correction=g.get("correction"), gg=g.get("gg"),
                                        model=g.get("model"))
-        pl.render_grouped(self.fig, labels, names, block, opts, result)
+        source = self._color_source(t)
+        pl.render_grouped(self.fig, labels, names, block, opts, result, source)
         self._paper()
         self._fit_canvas(*self.fig.get_size_inches())
         self.canvas.draw_idle()
         has = bool(np.isfinite(block).any())
+        vtable = getattr(self.fig, "stel_volcano", None)
         self.last = {"kind": "grouped", "labels": labels, "names": names, "block": block,
-                     "opts": opts, "result": result, "has": has, "title": t.title}
+                     "opts": opts, "result": result, "has": has, "title": t.title,
+                     "volcano": vtable,
+                     "draw": lambda fig: pl.render_grouped(fig, labels, names, block, opts, result,
+                                                           source)}
         rf, cf = self._factor_names()
+        if vtable is not None:
+            self._show_summary(self._volcano_summary(vtable), [], t)
+            self.results.setPlainText(volcano.volcano_text(vtable) + self._excluded_note(t))
+            return
         self._show_summary(*(interpret.grouped_summary(result, rf, cf) if (has and result) else ("", [])), t)
         if not has:
             self.results.setPlainText("Enter a label for each row and replicate values for each data set.")
@@ -3434,12 +4101,19 @@ class MainWindow(QtWidgets.QMainWindow):
         x, series = t.panel.get_xy(keys)
         fits = ([se.fit_curve(name, x, y, opts.fit_model) for name, y in series]
                 if opts.fit_model != "None" else [])
-        pl.render_xy(self.fig, x, series, opts, fits)
+        titles = t.panel.row_title_list()
+        pl.render_xy(self.fig, x, series, opts, fits, titles)
         self._paper()
         self._fit_canvas(*self.fig.get_size_inches())
         self.canvas.draw_idle()
+        vtable = getattr(self.fig, "stel_volcano", None)
         self.last = {"kind": "xy", "x": x, "series": series, "opts": opts, "fits": fits,
-                     "title": t.title}
+                     "title": t.title, "volcano": vtable,
+                     "draw": lambda fig: pl.render_xy(fig, x, series, opts, fits, titles)}
+        if vtable is not None:
+            self.results.setPlainText(volcano.volcano_text(vtable) + self._excluded_note(t))
+            self._show_summary(self._volcano_summary(vtable), [], t)
+            return
         if series:
             counts = [(name, int(pl.xy_summary(x, y, opts.error)[0].size)) for name, y in series]
             self.results.setPlainText(se.xy_report(fits, opts.error, counts) + self._excluded_note(t))
@@ -3447,6 +4121,39 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.results.setPlainText("Enter X values in the first column and Y replicates beside them.")
             self._show_summary("", [], t)
+
+    @staticmethod
+    def _volcano_summary(vt):
+        c = vt["counts"]
+        which = "adjusted P" if vt["use_fdr"] else "P"
+        return (f"{c['Up']} rows are higher and {c['Down']} lower (|log2 fold change| at least "
+                f"{vt['fc_cutoff']:g} and {which} below {vt['p_cutoff']:g}); {c['Not sig']} do not "
+                "pass both thresholds. With many rows, some P values fall below the cutoff by chance; "
+                "the Benjamini-Hochberg option controls the false discovery rate.")
+
+    def _refresh_xyz(self, t):
+        opts = t.opts.options(t.panel.headers())
+        x, y, z, c = t.panel.get_xyz()
+        p3.render_xyz(self.fig, x, y, z, c, opts)
+        self._paper()
+        self._fit_canvas(*self.fig.get_size_inches())
+        self.canvas.draw_idle()
+        ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        self.last = {"kind": "xyz", "opts": opts, "has": bool(ok.any()), "title": t.title,
+                     "xyz": (x, y, z, c), "headers": t.panel.headers(),
+                     "draw": lambda fig: p3.render_xyz(fig, x, y, z, c, opts)}
+        if not ok.any():
+            self.results.setPlainText("Enter X, Y, and Z values for each point.")
+        else:
+            heads = t.panel.headers()
+            lines = [f"{int(ok.sum())} points with X, Y, and Z"]
+            for name, v in zip(heads, (x, y, z, c)):
+                v = v[ok & np.isfinite(v)]
+                if v.size:
+                    lines.append(f"{name}: {v.size} values, {se.fmt(float(v.min()))} to "
+                                 f"{se.fmt(float(v.max()))}, mean {se.fmt(float(v.mean()))}")
+            self.results.setPlainText("\n".join(lines) + self._excluded_note(t))
+        self._show_summary("", [], t)
 
     def _show_summary(self, text, warnings, t=None):
         warnings = list(warnings) + list(getattr(self.fig, "stel_notes", None) or [])
@@ -3477,6 +4184,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return t.opts.get("test")
         if t.kind == "grouped":
             return "Two-way ANOVA" if t.opts.get("analysis") != "None" else "None"
+        if t.kind == "xyz":
+            return "None"
         return t.opts.get("fit_model")
 
     def interpret_text(self):
@@ -3520,7 +4229,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.last:
             return False
         kind = self.last["kind"]
-        if kind == "grouped":
+        if kind in ("grouped", "xyz"):
             return self.last["has"]
         return bool(self.last["groups"] if kind == "column" else self.last["series"])
 
@@ -3553,14 +4262,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Render the current graph at export size and save it (no dialogs)."""
         opts = self.last["opts"]
         fig = Figure(figsize=(opts.width_in, opts.height_in))
-        kind = self.last["kind"]
-        if kind == "column":
-            pl.render_column(fig, self.last["groups"], opts, self.last["result"])
-        elif kind == "grouped":
-            pl.render_grouped(fig, self.last["labels"], self.last["names"], self.last["block"],
-                              opts, self.last["result"])
-        else:
-            pl.render_xy(fig, self.last["x"], self.last["series"], opts, self.last["fits"])
+        self.last["draw"](fig)
         pl.save_figure(fig, path, author=self.author_edit.text().strip() or DEFAULT_AUTHOR,
                        title=opts.title, trim=self.trim_check.isChecked(),
                        transparent=self.transparent_check.isChecked())
@@ -3589,7 +4291,18 @@ class MainWindow(QtWidgets.QMainWindow):
         """Write the current results as CSV in Prism's layout where available (no dialogs)."""
         kind = self.last["kind"]
         title = self._table_title(self.last["opts"])
-        if kind == "column":
+        if self.last.get("volcano") is not None:
+            volcano.write_volcano_csv(path, self.last["volcano"])
+        elif kind == "xyz":
+            import csv
+            x, y, z, c = self.last["xyz"]
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                w.writerow(self.last["headers"])
+                for row in zip(x, y, z, c):
+                    if all(np.isfinite(row[:3])):
+                        w.writerow(["" if not np.isfinite(v) else format(v, ".6g") for v in row])
+        elif kind == "column":
             se.write_column_csv(path, self.last["result"], title)
         elif kind == "grouped":
             rf, cf = self._factor_names()
@@ -3609,7 +4322,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._has_data():
             return
         opts = self.last["opts"]
-        if self.last["kind"] == "column":
+        vt = self.last.get("volcano")
+        if vt is not None:
+            text = self._volcano_methods(vt, opts)
+        elif self.last["kind"] == "xyz":
+            text = (f"Data were plotted as a 3D {opts.plot_type.replace('3D ', '').lower()} graph "
+                    f"in {APP_NAME} {__version__}.")
+        elif self.last["kind"] == "column":
             text = se.methods_text(self.last["result"], opts.error, opts.plot_type,
                                    opts.show_points or opts.plot_type == "Scatter dot plot")
         elif self.last["kind"] == "grouped":
@@ -3624,6 +4343,24 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.clipboard().setText(text)
         self.statusBar().showMessage("Methods text copied. Review it before use.", 6000)
 
+    def _volcano_methods(self, vt, opts):
+        v = opts.volcano
+        which = ("Benjamini-Hochberg adjusted P values (false discovery rate)" if vt["use_fdr"]
+                 else "P values")
+        if self.last["kind"] == "grouped":
+            names = self.last["names"]
+            fc = ("the difference in mean log2 values" if v.already_log else
+                  "log2 of the ratio of means")
+            test = ("Welch's unpaired t test" if v.test == volcano.TESTS[0]
+                    else "an unpaired t test assuming equal SDs")
+            how = (f"For each row, the fold change of {names[1]} relative to {names[0]} was "
+                   f"calculated as {fc}, and P values were from {test}. ")
+        else:
+            how = "Fold changes (log2) and P values were entered as computed. "
+        return (how + f"Rows with |log2 fold change| of at least {vt['fc_cutoff']:g} and {which} "
+                f"below {vt['p_cutoff']:g} were called changed ({vt['counts']['Up']} up, "
+                f"{vt['counts']['Down']} down). Volcano plots were made in {APP_NAME} {__version__}.")
+
     # ----- projects
     def project_state(self):
         return {"app": APP_NAME, "version": __version__, "format": 2,
@@ -3632,6 +4369,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "export": {"author": self.author_edit.text(), "trim": self.trim_check.isChecked(),
                            "transparent": self.transparent_check.isChecked()},
                 "styles": self._styles_in_use(),
+                "palettes": self._palettes_in_use(),
                 "layout": self.layout_state() if hasattr(self, "layout_picker") else {}}
 
     @staticmethod
@@ -3663,6 +4401,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if name not in ls.STYLE_PRESETS and name not in ls.CUSTOM_STYLES and isinstance(values, dict):
                 try:
                     ls.register_style(name, values)
+                except ValueError:
+                    pass
+        for name, colors in (st.get("palettes") or {}).items():
+            if name not in ls.PALETTES and isinstance(colors, list):
+                try:
+                    ls.register_palette(name, colors)
                 except ValueError:
                     pass
         self._refresh_style_lists()
