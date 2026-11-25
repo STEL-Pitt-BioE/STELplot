@@ -21,6 +21,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from scipy import stats
 
+from stelplot import interpret
 from stelplot import lab_style as ls
 from stelplot import plot3d as p3
 from stelplot import plotting as pl
@@ -301,6 +302,43 @@ def test_3d():
               all(os.path.getsize(os.path.join(tmp, "s" + e)) > 0 for e in (".svg", ".pdf", ".png")))
 
 
+def test_volcano_interpret():
+    rng = np.random.default_rng(8)
+    n = 300
+    A = rng.normal(20, 0.2, (n, 4))
+    B = A + rng.normal(0, 0.2, (n, 4))
+    B[:12] += 2.0
+    B[12:20] -= 2.0
+    Dv = np.stack([2 ** A, 2 ** B], axis=1)
+    fig = Figure()
+    pl.render_grouped(fig, [f"P{i}" for i in range(n)], ["WT", "KO"], Dv,
+                      pl.GroupedPlotOptions(plot_type=pl.VOLCANO, volcano=pl.VolcanoOptions()))
+    vt = fig.stel_volcano
+    text, warnings = interpret.volcano_summary(vt)
+    check("volcano summary names the comparison, the counts, the cutoffs, and the test",
+          f"{vt['counts']['Up']} are higher in KO than in WT" in text
+          and f"{vt['counts']['Down']} are lower in KO than in WT" in text
+          and "2-fold" in text and "Welch's t test" in text)
+    check("unadjusted P on many rows warns about chance hits and suggests the FDR option",
+          any("by chance alone" in w and "Benjamini-Hochberg" in w for w in warnings))
+    fig = Figure()
+    pl.render_grouped(fig, [f"P{i}" for i in range(n)], ["WT", "KO"], Dv, pl.GroupedPlotOptions(
+        plot_type=pl.VOLCANO, volcano=pl.VolcanoOptions(use_fdr=True)))
+    text, warnings = interpret.volcano_summary(fig.stel_volcano)
+    check("with adjusted P the summary states the false discovery rate and drops the warning",
+          "false discoveries" in text and not any("by chance alone" in w for w in warnings))
+    fig = Figure()
+    pl.render_xy(fig, np.array([2.0, -2.0, 0.1]), [("P", np.array([[1e-4], [1e-3], [0.5]]))],
+                 pl.XYPlotOptions(plot_type=pl.VOLCANO, volcano=pl.VolcanoOptions()))
+    text, warnings = interpret.volcano_summary(fig.stel_volcano)
+    check("XY volcano summary uses up and down, and notes the P values were entered",
+          "1 are up" in text and any("were entered" in w for w in warnings))
+    help_ = interpret.help_text("Volcano plot")
+    check("Interpret explains volcano plots, not two-way ANOVA",
+          help_.startswith("Volcano plot") and "false discovery rate" in help_
+          and "Two-way" not in help_)
+
+
 if __name__ == "__main__":
     test_summary_over_points()
     test_grouped_box_and_arrangements()
@@ -311,4 +349,5 @@ if __name__ == "__main__":
     test_circle_heat_map()
     test_custom_colors()
     test_3d()
+    test_volcano_interpret()
     print("\nAll graph type checks passed.")

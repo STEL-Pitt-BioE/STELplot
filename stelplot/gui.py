@@ -4073,7 +4073,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                            source)}
         rf, cf = self._factor_names()
         if vtable is not None:
-            self._show_summary(self._volcano_summary(vtable), [], t)
+            self._show_summary(*interpret.volcano_summary(vtable), t)
             self.results.setPlainText(volcano.volcano_text(vtable) + self._excluded_note(t))
             return
         self._show_summary(*(interpret.grouped_summary(result, rf, cf) if (has and result) else ("", [])), t)
@@ -4112,7 +4112,7 @@ class MainWindow(QtWidgets.QMainWindow):
                      "draw": lambda fig: pl.render_xy(fig, x, series, opts, fits, titles)}
         if vtable is not None:
             self.results.setPlainText(volcano.volcano_text(vtable) + self._excluded_note(t))
-            self._show_summary(self._volcano_summary(vtable), [], t)
+            self._show_summary(*interpret.volcano_summary(vtable), t)
             return
         if series:
             counts = [(name, int(pl.xy_summary(x, y, opts.error)[0].size)) for name, y in series]
@@ -4121,15 +4121,6 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.results.setPlainText("Enter X values in the first column and Y replicates beside them.")
             self._show_summary("", [], t)
-
-    @staticmethod
-    def _volcano_summary(vt):
-        c = vt["counts"]
-        which = "adjusted P" if vt["use_fdr"] else "P"
-        return (f"{c['Up']} rows are higher and {c['Down']} lower (|log2 fold change| at least "
-                f"{vt['fc_cutoff']:g} and {which} below {vt['p_cutoff']:g}); {c['Not sig']} do not "
-                "pass both thresholds. With many rows, some P values fall below the cutoff by chance; "
-                "the Benjamini-Hochberg option controls the false discovery rate.")
 
     def _refresh_xyz(self, t):
         opts = t.opts.options(t.panel.headers())
@@ -4180,6 +4171,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def interpret_name(self, t=None):
         t = t or self.current_table()
+        if t.kind in ("grouped", "xy") and t.opts.get("plot_type") == pl.VOLCANO:
+            return "Volcano plot"
         if t.kind == "column":
             return t.opts.get("test")
         if t.kind == "grouped":

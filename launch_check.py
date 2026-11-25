@@ -659,6 +659,9 @@ def interface():
         raise RuntimeError("The grouped volcano plot did not list its results")
     if g.opts.sections["Volcano plot"].isHidden():
         raise RuntimeError("Volcano settings are hidden for a volcano plot")
+    if not (win.interpret_text().startswith("Volcano plot") and "higher in WT" not in
+            win.summary_label.text() and "higher in KO" in win.summary_label.text()):
+        raise RuntimeError("Interpret and the summary do not describe the volcano plot")
     win.save_results_to(os.path.join(out, "volcano.csv"))
     win.save_figure_to(os.path.join(out, "volcano.svg"))
     g2 = win.add_table("grouped", "Arrangements")
@@ -718,7 +721,7 @@ def interface():
         raise RuntimeError("A custom color scheme did not come back with the project")
     if [t.kind for t in win.tables][-1] != "xyz" or not win.tables[-2].panel.row_titles:
         raise RuntimeError("3D tables or XY row titles were not saved in the project")
-    done.append("volcano plots (grouped and XY), grouped box plots, area plots, interleaved, "
+    done.append("volcano plots (grouped and XY) with Interpret, grouped box plots, area plots, interleaved, "
                 "separated, stacked, and superimposed bars, horizontal graphs, right Y axis, circle "
                 "heat map, 3D tables (scatter, line, surface, wireframe, bars), custom color schemes")
 

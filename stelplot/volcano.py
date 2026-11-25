@@ -272,6 +272,8 @@ def render_grouped_volcano(fig, row_labels, col_names, D, opts, st):
         fig.stel_notes.append(f"{few} row(s) have fewer than two values in a data set and get no "
                               "P value.")
     table = volcano_table(row_labels, fc, p, v)
+    table.update(source="grouped", compared=(col_names[1], col_names[0]), test=v.test,
+                 already_log=v.already_log, no_p=few)
     x_label = (opts.x_label or
                f"log$_2$ fold change ({col_names[1]} / {col_names[0]})")
     return draw_volcano(fig, table, opts, st, x_label, _y_title(opts, v.use_fdr, ("", "Value")))
@@ -304,5 +306,6 @@ def render_xy_volcano(fig, x, series, opts, st, row_titles=None):
     titles = list(row_titles or [])[:n] + [""] * max(0, n - len(row_titles or []))
     names = [t or f"Row {i + 1}" for i, t in enumerate(titles)]
     table = volcano_table(names, fc, p, v)
+    table.update(source="xy", compared=None, test=None, already_log=None, no_p=0)
     x_label = opts.x_label if opts.x_label not in ("", "X") else "log$_2$ fold change"
     return draw_volcano(fig, table, opts, st, x_label, _y_title(opts, v.use_fdr, ("", "Y")))

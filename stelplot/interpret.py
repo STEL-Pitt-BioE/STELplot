@@ -281,6 +281,62 @@ def xy_summary(fits, x=None):
 
 
 # ---------------------------------------------------------------------------
+# Volcano plots
+# ---------------------------------------------------------------------------
+
+def volcano_summary(vt):
+    """(plain-language summary, list of warnings) for a volcano plot's table (see volcano.py)."""
+    if vt is None:
+        return "", []
+    c = vt["counts"]
+    tested = int(np.sum(vt["keep"]))
+    which = "Benjamini-Hochberg adjusted P" if vt["use_fdr"] else "P"
+    fc_cut, p_cut = vt["fc_cutoff"], vt["p_cutoff"]
+    pair = vt.get("compared")
+    if pair:
+        higher = f"higher in {pair[0]} than in {pair[1]}"
+        lower = f"lower in {pair[0]} than in {pair[1]}"
+    else:
+        higher, lower = "up (positive fold change)", "down (negative fold change)"
+    text = (f"Of {tested} rows with a fold change and a P value, {c['Up']} are {higher} and "
+            f"{c['Down']} are {lower}: each changed at least {2 ** fc_cut:.3g}-fold "
+            f"(|log2 fold change| at least {fc_cut:g}) with {which} below {p_cut:g}. "
+            f"The other {c['Not sig']} do not pass both cutoffs.")
+    if vt.get("source") == "grouped":
+        test = ("Welch's t test" if vt.get("test", "").startswith("Welch")
+                else "an unpaired t test assuming equal SDs")
+        fc = ("difference of mean log2 values" if vt.get("already_log")
+              else "log2 of the ratio of means")
+        text += f" Each row was tested with {test}; the fold change is the {fc}."
+    if vt["use_fdr"]:
+        text += (f" Using adjusted P values, about {p_cut * 100:.3g}% of the rows called changed are "
+                 "expected to be false discoveries.")
+    return text, volcano_warnings(vt, tested)
+
+
+def volcano_warnings(vt, tested):
+    w = []
+    c = vt["counts"]
+    p_cut = vt["p_cutoff"]
+    if not vt["use_fdr"] and tested >= 20:
+        chance = p_cut * tested
+        if chance >= 1:
+            w.append(f"{tested} rows were each tested at P < {p_cut:g}, so up to about "
+                     f"{chance:.3g} could pass the P cutoff by chance alone (the fold change cutoff "
+                     "removes some of these). Consider 'Use adjusted P (Benjamini-Hochberg FDR)'.")
+    if tested and c["Up"] + c["Down"] == 0:
+        w.append("No rows pass both cutoffs. With few replicates, t tests have little power; a "
+                 "lower fold change cutoff or more replicates may help, but do not adjust cutoffs "
+                 "until something passes.")
+    if vt["fc_cutoff"] <= 0:
+        w.append("The fold change cutoff is 0, so any change counts; only the P value decides.")
+    if vt.get("source") == "xy":
+        w.append("P values were entered, not computed; their test and any adjustment for multiple "
+                 "comparisons come from the original analysis.")
+    return w
+
+
+# ---------------------------------------------------------------------------
 # Interpret: what each analysis does and how to read it
 # ---------------------------------------------------------------------------
 
@@ -357,6 +413,24 @@ HELP = {
         "mislead. Multiple comparisons test the specific differences you choose.",
         "'Main effects only' assumes no interaction. Cell-by-cell comparisons compare every cell "
         "with every other, which costs power because the number of comparisons grows quickly."),
+    "Volcano plot": (
+        "Plots each row (protein, gene, or site) by how much it changed (log2 fold change, X) and how "
+        "strong the evidence for a change is (-log10 P, Y). In a Grouped table, STELplot compares "
+        "the second data set with the first with a t test on each row; in an XY table, you enter "
+        "fold changes and P values from another analysis.",
+        "Each row's test assumes independent replicates and roughly Gaussian values within each "
+        "group (log-transform intensities first: proteomics and expression data are usually "
+        "log-normal; then check 'Values are already log2'). Rows are treated as independent, "
+        "which correlated proteins or genes are not.",
+        "Points far right are higher in the second data set, far left lower; higher points have "
+        "smaller P values. Colored points pass both cutoffs (dashed lines): a fold change at least "
+        "as large as the cutoff and a P value below it. A log2 fold change of 1 is a doubling, -1 a "
+        "halving. With adjusted P (Benjamini-Hochberg), the P cutoff is the false discovery rate: "
+        "0.05 means about 5% of the rows called changed are expected to be false.",
+        "With thousands of rows, many unadjusted P values fall below 0.05 by chance, so use the "
+        "adjusted P for discovery. With 3 or fewer replicates, per-row t tests have little power and "
+        "unstable SDs; moderated tests (for example limma) are more powerful for small samples. "
+        "Choose cutoffs before looking at the plot, and confirm key hits independently."),
     "Linear regression": (
         "Fits a straight line, Y = slope * X + intercept, by least squares.",
         "Points are independent, the relationship is linear, and scatter around the line is "
